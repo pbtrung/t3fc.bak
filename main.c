@@ -237,16 +237,6 @@ void decrypt_chunk(unsigned char *chunk, size_t nread, FILE *input,
     check_fatal_err(fwrite(dec_chunk, 1, out_len, stdout) != out_len,
                     "cannot write to stdout.");
     free(dec_chunk);
-    // if (in_len > 0) {
-    //     hc256_gen_bytes(hc256_ctx, ctr, T3F_BLOCK_LEN);
-    //     threefishEncryptBlockBytes(t3f_x, ctr, tmp);
-    //     for (uint32_t j = 0; j < in_len; ++j) {
-    //         tmp_out[j] = tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
-    //     }
-    //     skeinUpdate(skein_x, &chunk[i * T3F_BLOCK_LEN], in_len);
-    //     check_fatal_err(fwrite(tmp_out, 1, in_len, stdout) != in_len,
-    //                     "cannot write to stdout.");
-    // }
 }
 
 void encrypt_chunk(unsigned char *chunk, size_t nread, FILE *input,
@@ -274,14 +264,4 @@ void t3f_encrypt(unsigned char *chunk, size_t nread, FILE *output,
         check_fatal_err(fwrite(tmp_out, 1, T3F_BLOCK_LEN, stdout) != T3F_BLOCK_LEN,
                         "cannot write to stdout.");
     }
-    // if (in_len > 0) {
-    //     hc256_gen_bytes(hc256_ctx, ctr, T3F_BLOCK_LEN);
-    //     threefishEncryptBlockBytes(t3f_x, ctr, tmp);
-    //     for (uint32_t j = 0; j < in_len; ++j) {
-    //         tmp_out[j] = tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
-    //     }
-    //     skeinUpdate(skein_x, tmp_out, in_len);
-    //     check_fatal_err(fwrite(tmp_out, 1, in_len, stdout) != in_len,
-    //                     "cannot write to stdout.");
-    // }
 }
