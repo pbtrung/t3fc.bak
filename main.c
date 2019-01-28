@@ -1,9 +1,8 @@
-#include <sodium.h>
-
 #include "argon2/argon2.h"
 #include "hc256/hc256.h"
 #include "skein3fish/skeinApi.h"
 #include "skein3fish/threefishApi.h"
+#include "randombytes/randombytes.h"
 
 #define STB_LIB_IMPLEMENTATION
 #include "stb_lib.h"
@@ -73,7 +72,7 @@ int main(int argc, char *argv[]) {
     check_fatal_err(sodium_init() < 0, "cannot initialize libsodium.");
 
     if (argc == 2 && strcmp(argv[1], "-mk") == 0) {
-        randombytes_buf(key, KEY_LEN);
+        randombytes(key, KEY_LEN);
         check_fatal_err(fwrite(key, 1, KEY_LEN, stdout) != KEY_LEN,
                         "cannot write key to file.");
 
@@ -137,7 +136,7 @@ void encrypt(FILE *input, FILE *output, uint8_t *key) {
     check_fatal_err(fwrite(header, 1, HEADER_LEN, output) != HEADER_LEN,
                     "cannot write header.");
     uint8_t salt[SALT_LEN];
-    randombytes_buf(salt, SALT_LEN);
+    randombytes(salt, SALT_LEN);
     check_fatal_err(fwrite(salt, 1, SALT_LEN, output) != SALT_LEN,
                     "cannot write salt.");
 
