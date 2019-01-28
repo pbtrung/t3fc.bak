@@ -8,7 +8,7 @@
 #define STB_LIB_IMPLEMENTATION
 #include "stb_lib.h"
 
-#define KEY_LEN 128UL
+#define KEY_LEN 256UL
 #define HEADER_LEN 6UL
 #define TWEAK_LEN 16UL
 #define SALT_LEN 32UL
@@ -44,6 +44,8 @@ FILE *t3fc_fopen(const char *path, const char *flags) {
 
 void get_key_from_file(const char *key_file, uint8_t *key) {
     FILE *f = t3fc_fopen(key_file, "rb");
+    check_fatal_err(stb_filelen(f) != KEY_LEN,
+                    "key file must have exactly 256 bytes.");
     check_fatal_err(fread(key, 1, KEY_LEN, f) != KEY_LEN,
                     "cannot read key from file.");
     fclose(f);
@@ -74,24 +76,34 @@ int main(int argc, char *argv[]) {
         randombytes_buf(key, KEY_LEN);
         check_fatal_err(fwrite(key, 1, KEY_LEN, stdout) != KEY_LEN,
                         "cannot write key to file.");
-    } else if (argc == 8 && strcmp(argv[1], "-e") == 0 &&
+
+    } else if (argc == 8 &&
+               (strcmp(argv[1], "-e") == 0 || strcmp(argv[1], "-d") == 0) &&
                strcmp(argv[2], "-k") == 0 && strcmp(argv[4], "-i") == 0 &&
                strcmp(argv[6], "-o") == 0) {
+
         get_key_from_file(argv[3], key);
+        if (stb_fexists(argv[7])) {
+            char yn;
+            do {
+                printf("File exists. Do you want to overwrite? (y/n) ");
+                scanf("%s", &yn);
+            } while (yn != 'n' && yn != 'N' && yn != 'y' && yn != 'Y');
+            if (yn == 'n' || yn == 'N') {
+                printf("Please choose a different output file.\n");
+                return EXIT_SUCCESS;
+            }
+        }
         FILE *input = t3fc_fopen(argv[5], "rb");
         FILE *output = t3fc_fopen(argv[7], "wb");
-        encrypt(input, output, key);
+        if (strcmp(argv[1], "-e") == 0) {
+            encrypt(input, output, key);
+        } else if (strcmp(argv[1], "-d") == 0) {
+            decrypt(input, output, key);
+        }
         fclose(input);
         fclose(output);
-    } else if (argc == 8 && strcmp(argv[1], "-d") == 0 &&
-               strcmp(argv[2], "-k") == 0 && strcmp(argv[4], "-i") == 0 &&
-               strcmp(argv[6], "-o") == 0) {
-        get_key_from_file(argv[3], key);
-        FILE *input = t3fc_fopen(argv[5], "rb");
-        FILE *output = t3fc_fopen(argv[7], "wb");
-        decrypt(input, output, key);
-        fclose(input);
-        fclose(output);
+
     } else {
         check_fatal_err(1, "unknown options.");
     }
@@ -199,13 +211,15 @@ void decrypt(FILE *input, FILE *output, uint8_t *key) {
             chunk_len = infile_len - i * CHUNK_LEN;
         }
         read_len = fread(chunk, 1, chunk_len, input);
-        check_fatal_err(read_len != chunk_len && ferror(input), "cannot read input.");
+        check_fatal_err(read_len != chunk_len && ferror(input),
+                        "cannot read input.");
         decrypt_chunk(chunk, read_len, input, output, hc256_ctx, t3f_x,
                       skein_x);
     }
 
     read_len = fread(chunk, 1, SKEIN_MAC_LEN, input);
-    check_fatal_err(read_len != SKEIN_MAC_LEN && ferror(input), "cannot read input.");
+    check_fatal_err(read_len != SKEIN_MAC_LEN && ferror(input),
+                    "cannot read input.");
     unsigned char hash[SKEIN_MAC_LEN];
     skeinFinal(skein_x, hash);
     check_fatal_err(memcmp(hash, chunk, SKEIN_MAC_LEN) != 0,
