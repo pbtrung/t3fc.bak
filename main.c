@@ -7,7 +7,7 @@
 #define ZPL_IMPLEMENTATION
 #include "zpl.h"
 
-#define KEY_LEN 256UL
+#define KEY_LEN 128UL
 #define HEADER_LEN 6UL
 #define TWEAK_LEN 16UL
 #define SALT_LEN 32UL
@@ -37,12 +37,17 @@ void check_fatal_err(int cond, char *msg) {
 }
 
 void get_key_from_file(const char *key_file, uint8_t *key) {
+<<<<<<< HEAD
     zpl_file f = {0};
     zplFileError rc = zpl_file_open(&f, key_file);
     check_fatal_err(rc != ZPL_FILE_ERROR_NONE, "cannot open file.");
     check_fatal_err(zpl_file_size(&f) != KEY_LEN,
                     "key file must have exactly 256 bytes.");
     check_fatal_err(zpl_file_read(&f, key, KEY_LEN) != 1,
+=======
+    FILE *f = t3fc_fopen(key_file, "rb");
+    check_fatal_err(fread(key, 1, KEY_LEN, f) != KEY_LEN,
+>>>>>>> parent of 5de0d7d... Confirm overwrite and check key file size
                     "cannot read key from file.");
     zpl_file_close(&f);
 }
@@ -66,6 +71,7 @@ void prepare(uint8_t *enc_key, hc256_ctx_t *hc256_ctx, ThreefishKey_t *t3f_x,
 
 int main(int argc, char *argv[]) {
 
+<<<<<<< HEAD
     if (argc == 3 && strcmp(argv[1], "-mk") == 0) {
         randombytes(key, KEY_LEN);
         zpl_file f = {0};
@@ -77,10 +83,19 @@ int main(int argc, char *argv[]) {
 
     } else if (argc == 8 &&
                (strcmp(argv[1], "-e") == 0 || strcmp(argv[1], "-d") == 0) &&
+=======
+    check_fatal_err(sodium_init() < 0, "cannot initialize libsodium.");
+
+    if (argc == 2 && strcmp(argv[1], "-mk") == 0) {
+        randombytes_buf(key, KEY_LEN);
+        check_fatal_err(fwrite(key, 1, KEY_LEN, stdout) != KEY_LEN,
+                        "cannot write key to file.");
+    } else if (argc == 8 && strcmp(argv[1], "-e") == 0 &&
+>>>>>>> parent of 5de0d7d... Confirm overwrite and check key file size
                strcmp(argv[2], "-k") == 0 && strcmp(argv[4], "-i") == 0 &&
                strcmp(argv[6], "-o") == 0) {
-
         get_key_from_file(argv[3], key);
+<<<<<<< HEAD
         if (zpl_file_exists(argv[7])) {
             char yn;
             do {
@@ -106,6 +121,22 @@ int main(int argc, char *argv[]) {
         zpl_file_close(&input);
         zpl_file_close(&output);
 
+=======
+        FILE *input = t3fc_fopen(argv[5], "rb");
+        FILE *output = t3fc_fopen(argv[7], "wb");
+        encrypt(input, output, key);
+        fclose(input);
+        fclose(output);
+    } else if (argc == 8 && strcmp(argv[1], "-d") == 0 &&
+               strcmp(argv[2], "-k") == 0 && strcmp(argv[4], "-i") == 0 &&
+               strcmp(argv[6], "-o") == 0) {
+        get_key_from_file(argv[3], key);
+        FILE *input = t3fc_fopen(argv[5], "rb");
+        FILE *output = t3fc_fopen(argv[7], "wb");
+        decrypt(input, output, key);
+        fclose(input);
+        fclose(output);
+>>>>>>> parent of 5de0d7d... Confirm overwrite and check key file size
     } else {
         check_fatal_err(1, "unknown options.");
     }
@@ -214,6 +245,7 @@ void decrypt(zpl_file *input, zpl_file *output, uint8_t *key) {
         if (i == num_read - 1) {
             chunk_len = infile_len - i * CHUNK_LEN;
         }
+<<<<<<< HEAD
         rc = zpl_file_read_at_check(input, chunk, chunk_len, total_bytes_read, &bytes_read);
         check_fatal_err(rc != 1, "cannot read input.");
         decrypt_chunk(chunk, bytes_read, input, output, hc256_ctx, t3f_x,
@@ -224,6 +256,16 @@ void decrypt(zpl_file *input, zpl_file *output, uint8_t *key) {
     rc = zpl_file_read_at_check(input, chunk, SKEIN_MAC_LEN, total_bytes_read, &bytes_read);
     check_fatal_err(rc != 1 || bytes_read != SKEIN_MAC_LEN, "cannot read input.");
 
+=======
+        read_len = fread(chunk, 1, chunk_len, input);
+        check_fatal_err(read_len != chunk_len && ferror(input), "cannot read input.");
+        decrypt_chunk(chunk, read_len, input, output, hc256_ctx, t3f_x,
+                      skein_x);
+    }
+
+    read_len = fread(chunk, 1, SKEIN_MAC_LEN, input);
+    check_fatal_err(read_len != SKEIN_MAC_LEN && ferror(input), "cannot read input.");
+>>>>>>> parent of 5de0d7d... Confirm overwrite and check key file size
     unsigned char hash[SKEIN_MAC_LEN];
     skeinFinal(skein_x, hash);
     check_fatal_err(memcmp(hash, chunk, SKEIN_MAC_LEN) != 0,
