@@ -1,8 +1,8 @@
 #include "argon2/argon2.h"
 #include "hc256/hc256.h"
+#include "randombytes/randombytes.h"
 #include "skein3fish/skeinApi.h"
 #include "skein3fish/threefishApi.h"
-#include "randombytes/randombytes.h"
 
 #define STB_LIB_IMPLEMENTATION
 #include "stb_lib.h"
@@ -244,7 +244,6 @@ void decrypt_chunk(unsigned char *chunk, size_t nread, FILE *input,
         for (uint32_t j = 0; j < T3F_BLOCK_LEN; ++j) {
             tmp_out[j] = tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
         }
-        skeinUpdate(skein_x, &chunk[i * T3F_BLOCK_LEN], T3F_BLOCK_LEN);
         check_fatal_err(fwrite(tmp_out, 1, T3F_BLOCK_LEN, output) !=
                             T3F_BLOCK_LEN,
                         "cannot write to file.");
@@ -255,10 +254,10 @@ void decrypt_chunk(unsigned char *chunk, size_t nread, FILE *input,
         for (uint32_t j = 0; j < in_len; ++j) {
             tmp_out[j] = tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
         }
-        skeinUpdate(skein_x, &chunk[i * T3F_BLOCK_LEN], in_len);
         check_fatal_err(fwrite(tmp_out, 1, in_len, output) != in_len,
                         "cannot write to file.");
     }
+    skeinUpdate(skein_x, chunk, nread);
 }
 
 void encrypt_chunk(unsigned char *chunk, size_t nread, FILE *input,
