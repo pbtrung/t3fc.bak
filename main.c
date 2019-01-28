@@ -69,8 +69,6 @@ void prepare(uint8_t *enc_key, hc256_ctx_t *hc256_ctx, ThreefishKey_t *t3f_x,
 
 int main(int argc, char *argv[]) {
 
-    check_fatal_err(sodium_init() < 0, "cannot initialize libsodium.");
-
     if (argc == 2 && strcmp(argv[1], "-mk") == 0) {
         randombytes(key, KEY_LEN);
         check_fatal_err(fwrite(key, 1, KEY_LEN, stdout) != KEY_LEN,
