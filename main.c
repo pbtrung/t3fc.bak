@@ -1,5 +1,5 @@
 #include "argon2/argon2.h"
-#include "hc256/hc256.h"
+#include "hc256/hc256_opt32.h"
 #include "randombytes/randombytes.h"
 #include "skein3fish/skeinApi.h"
 #include "skein3fish/threefishApi.h"
@@ -11,7 +11,9 @@
 #define HEADER_LEN 6UL
 #define T3F_TWEAK_LEN 16UL
 #define SALT_LEN 32UL
-#define HC256_KIV_LEN 64UL
+#define HC256_KEY_LEN 32UL
+#define HC256_IV_LEN 32UL
+#define HC256_KIV_LEN (HC256_KEY_LEN + HC256_IV_LEN)
 #define T3F_KEY_LEN 128UL
 #define T3F_BLOCK_LEN 128UL
 #define NUM_BLOCKS 2048UL
@@ -58,13 +60,13 @@ void *t3fc_malloc(size_t s) {
 
 void encrypt(FILE *input, FILE *output, unsigned char *key);
 void encrypt_chunk(unsigned char *chunk, size_t chunk_len, FILE *input,
-                   FILE *output, hc256_ctx_t *hc256_ctx, ThreefishKey_t *t3f_x,
+                   FILE *output, HC256_State *hc256_st, ThreefishKey_t *t3f_x,
                    SkeinCtx_t *skein_x);
 void decrypt(FILE *input, FILE *output, unsigned char *key);
 void decrypt_chunk(unsigned char *chunk, size_t chunk_len, FILE *input,
-                   FILE *output, hc256_ctx_t *hc256_ctx, ThreefishKey_t *t3f_x,
+                   FILE *output, HC256_State *hc256_st, ThreefishKey_t *t3f_x,
                    SkeinCtx_t *skein_x);
-void prepare(unsigned char *enc_key, hc256_ctx_t *hc256_ctx,
+void prepare(unsigned char *enc_key, HC256_State *hc256_st,
              ThreefishKey_t *t3f_x, SkeinCtx_t *skein_x);
 
 int main(int argc, char *argv[]) {
@@ -111,12 +113,10 @@ int main(int argc, char *argv[]) {
     return EXIT_SUCCESS;
 }
 
-void prepare(unsigned char *enc_key, hc256_ctx_t *hc256_ctx,
+void prepare(unsigned char *enc_key, HC256_State *hc256_st,
              ThreefishKey_t *t3f_x, SkeinCtx_t *skein_x) {
 
-    unsigned char hc256_kiv[HC256_KIV_LEN];
-    memcpy(hc256_kiv, enc_key, HC256_KIV_LEN);
-    hc256_set_kiv(hc256_ctx, hc256_kiv);
+    Initialization(hc256_st, enc_key, &enc_key[HC256_KEY_LEN]);
 
     unsigned char t3f_key[T3F_KEY_LEN];
     unsigned char t3f_tweak[T3F_TWEAK_LEN];
@@ -146,10 +146,10 @@ void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
                                       enc_key, ENC_KEY_LEN) != ARGON2_OK,
                     "Argon2 failed.");
 
-    hc256_ctx_t *hc256_ctx = t3fc_malloc(sizeof(hc256_ctx_t));
+    HC256_State hc256_st = {0};
     ThreefishKey_t *t3f_x = t3fc_malloc(sizeof(ThreefishKey_t));
     SkeinCtx_t *skein_x = t3fc_malloc(sizeof(SkeinCtx_t));
-    prepare(enc_key, hc256_ctx, t3f_x, skein_x);
+    prepare(enc_key, &hc256_st, t3f_x, skein_x);
     skeinUpdate(skein_x, header, HEADER_LEN);
     skeinUpdate(skein_x, salt, SALT_LEN);
 
@@ -159,7 +159,7 @@ void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
         read_len = fread(chunk, 1, CHUNK_LEN, input);
         check_fatal_err(read_len != CHUNK_LEN && ferror(input),
                         "cannot read input.");
-        encrypt_chunk(chunk, read_len, input, output, hc256_ctx, t3f_x,
+        encrypt_chunk(chunk, read_len, input, output, &hc256_st, t3f_x,
                       skein_x);
         if (read_len < CHUNK_LEN) {
             break;
@@ -171,24 +171,25 @@ void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
     check_fatal_err(fwrite(hash, 1, SKEIN_MAC_LEN, output) != SKEIN_MAC_LEN,
                     "cannot write Skein MAC.");
 
-    free(hc256_ctx);
     free(t3f_x);
     free(chunk);
     free(skein_x);
 }
 
 void encrypt_chunk(unsigned char *chunk, size_t chunk_len, FILE *input,
-                   FILE *output, hc256_ctx_t *hc256_ctx, ThreefishKey_t *t3f_x,
+                   FILE *output, HC256_State *hc256_st, ThreefishKey_t *t3f_x,
                    SkeinCtx_t *skein_x) {
 
     unsigned char tmp[T3F_BLOCK_LEN];
-    unsigned char ctr[T3F_BLOCK_LEN];
     unsigned char tmp_out[T3F_BLOCK_LEN];
+
+    unsigned char ctr[T3F_BLOCK_LEN];
+    memset(ctr, 0, T3F_BLOCK_LEN);
 
     uint32_t i = 0;
     size_t in_len = chunk_len;
     for (; in_len >= T3F_BLOCK_LEN; ++i, in_len -= T3F_BLOCK_LEN) {
-        hc256_gen_bytes(hc256_ctx, ctr, T3F_BLOCK_LEN);
+        EncryptMessage(hc256_st, ctr, ctr, T3F_BLOCK_LEN);
         threefishEncryptBlockBytes(t3f_x, ctr, tmp);
         for (uint32_t j = 0; j < T3F_BLOCK_LEN; ++j) {
             tmp_out[j] = tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
@@ -199,7 +200,7 @@ void encrypt_chunk(unsigned char *chunk, size_t chunk_len, FILE *input,
                         "cannot write to file.");
     }
     if (in_len > 0) {
-        hc256_gen_bytes(hc256_ctx, ctr, T3F_BLOCK_LEN);
+        EncryptMessage(hc256_st, ctr, ctr, T3F_BLOCK_LEN);
         threefishEncryptBlockBytes(t3f_x, ctr, tmp);
         for (uint32_t j = 0; j < in_len; ++j) {
             tmp_out[j] = tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
@@ -226,10 +227,10 @@ void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
                                       enc_key, ENC_KEY_LEN) != ARGON2_OK,
                     "Argon2 failed.");
 
-    hc256_ctx_t *hc256_ctx = t3fc_malloc(sizeof(hc256_ctx_t));
+    HC256_State hc256_st = {0};
     ThreefishKey_t *t3f_x = t3fc_malloc(sizeof(ThreefishKey_t));
     SkeinCtx_t *skein_x = t3fc_malloc(sizeof(SkeinCtx_t));
-    prepare(enc_key, hc256_ctx, t3f_x, skein_x);
+    prepare(enc_key, &hc256_st, t3f_x, skein_x);
     skeinUpdate(skein_x, header, HEADER_LEN);
     skeinUpdate(skein_x, salt, SALT_LEN);
 
@@ -246,7 +247,7 @@ void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
         read_len = fread(chunk, 1, chunk_len, input);
         check_fatal_err(read_len != chunk_len && ferror(input),
                         "cannot read input.");
-        decrypt_chunk(chunk, read_len, input, output, hc256_ctx, t3f_x,
+        decrypt_chunk(chunk, read_len, input, output, &hc256_st, t3f_x,
                       skein_x);
     }
 
@@ -258,24 +259,25 @@ void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
     check_fatal_err(memcmp(hash, chunk, SKEIN_MAC_LEN) != 0,
                     "wrong Skein MAC.");
 
-    free(hc256_ctx);
     free(t3f_x);
     free(chunk);
     free(skein_x);
 }
 
 void decrypt_chunk(unsigned char *chunk, size_t chunk_len, FILE *input,
-                   FILE *output, hc256_ctx_t *hc256_ctx, ThreefishKey_t *t3f_x,
+                   FILE *output, HC256_State *hc256_st, ThreefishKey_t *t3f_x,
                    SkeinCtx_t *skein_x) {
 
     unsigned char tmp[T3F_BLOCK_LEN];
-    unsigned char ctr[T3F_BLOCK_LEN];
     unsigned char tmp_out[T3F_BLOCK_LEN];
+
+    unsigned char ctr[T3F_BLOCK_LEN];
+    memset(ctr, 0, T3F_BLOCK_LEN);
 
     uint32_t i = 0;
     size_t in_len = chunk_len;
     for (; in_len >= T3F_BLOCK_LEN; ++i, in_len -= T3F_BLOCK_LEN) {
-        hc256_gen_bytes(hc256_ctx, ctr, T3F_BLOCK_LEN);
+        EncryptMessage(hc256_st, ctr, ctr, T3F_BLOCK_LEN);
         threefishEncryptBlockBytes(t3f_x, ctr, tmp);
         for (uint32_t j = 0; j < T3F_BLOCK_LEN; ++j) {
             tmp_out[j] = tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
@@ -285,7 +287,7 @@ void decrypt_chunk(unsigned char *chunk, size_t chunk_len, FILE *input,
                         "cannot write to file.");
     }
     if (in_len > 0) {
-        hc256_gen_bytes(hc256_ctx, ctr, T3F_BLOCK_LEN);
+        EncryptMessage(hc256_st, ctr, ctr, T3F_BLOCK_LEN);
         threefishEncryptBlockBytes(t3f_x, ctr, tmp);
         for (uint32_t j = 0; j < in_len; ++j) {
             tmp_out[j] = tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];

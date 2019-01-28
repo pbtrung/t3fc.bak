@@ -2,6 +2,7 @@
 #include <stdlib.h>
 
 #include "hc256.h"
+#include "hc256_opt32.h"
 
 #define HC256_LEN 64UL
 #define TEST_LEN 32UL
@@ -61,5 +62,23 @@ int main(int argc, char *argv[]) {
     check_fatal_err(memcmp(buf, test_vector_3, TEST_LEN) != 0, "does not match test vector 3.");
 
     free(hc256_ctx);
+
+    memset(hc256_kiv, 0, HC256_LEN);
+    memset(buf, 0, TEST_LEN);
+    HC256(hc256_kiv, &hc256_kiv[HC256_KEY_LEN], buf, buf, TEST_LEN);
+    check_fatal_err(memcmp(buf, test_vector_1, TEST_LEN) != 0, "does not match test vector 1.");
+
+    memset(hc256_kiv, 0, HC256_LEN);
+    hc256_kiv[HC256_KEY_LEN] = 0x01;
+    memset(buf, 0, TEST_LEN);
+    HC256(hc256_kiv, &hc256_kiv[HC256_KEY_LEN], buf, buf, TEST_LEN);
+    check_fatal_err(memcmp(buf, test_vector_2, TEST_LEN) != 0, "does not match test vector 2.");
+
+    memset(hc256_kiv, 0, HC256_LEN);
+    hc256_kiv[0] = 0x55;
+    memset(buf, 0, TEST_LEN);
+    HC256(hc256_kiv, &hc256_kiv[HC256_KEY_LEN], buf, buf, TEST_LEN);
+    check_fatal_err(memcmp(buf, test_vector_3, TEST_LEN) != 0, "does not match test vector 3.");
+
     return EXIT_SUCCESS;
 }
