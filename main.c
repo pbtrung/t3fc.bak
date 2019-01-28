@@ -7,17 +7,17 @@
 #define STB_LIB_IMPLEMENTATION
 #include "stb_lib.h"
 
-#define KEY_LEN 256UL
+#define MASTER_KEY_LEN 256UL
 #define HEADER_LEN 6UL
-#define TWEAK_LEN 16UL
+#define T3F_TWEAK_LEN 16UL
 #define SALT_LEN 32UL
-#define HC256_LEN 64UL
+#define HC256_KIV_LEN 64UL
 #define T3F_KEY_LEN 128UL
 #define T3F_BLOCK_LEN 128UL
 #define NUM_BLOCKS 1024UL
 #define CHUNK_LEN (T3F_BLOCK_LEN * NUM_BLOCKS)
 #define SKEIN_MAC_LEN 64UL
-#define ENC_KEY_LEN (HC256_LEN + T3F_KEY_LEN + TWEAK_LEN + SKEIN_MAC_LEN)
+#define ENC_KEY_LEN (HC256_KIV_LEN + T3F_KEY_LEN + T3F_TWEAK_LEN + SKEIN_MAC_LEN)
 
 // number of passes
 #define T 8U
@@ -26,8 +26,7 @@
 // number of threads and lanes
 #define P 1U
 
-static uint8_t key[KEY_LEN];
-static uint8_t header[HEADER_LEN] = {'t', '3', 'f', 'c', '0', '1'};
+unsigned char header[HEADER_LEN] = {'t', '3', 'f', 'c', '0', '1'};
 
 void check_fatal_err(int cond, char *msg) {
     if (cond) {
@@ -42,11 +41,11 @@ FILE *t3fc_fopen(const char *path, const char *flags) {
     return f;
 }
 
-void get_key_from_file(const char *key_file, uint8_t *key) {
+void get_key_from_file(const char *key_file, unsigned char *key) {
     FILE *f = t3fc_fopen(key_file, "rb");
-    check_fatal_err(stb_filelen(f) != KEY_LEN,
+    check_fatal_err(stb_filelen(f) != MASTER_KEY_LEN,
                     "key file must have exactly 256 bytes.");
-    check_fatal_err(fread(key, 1, KEY_LEN, f) != KEY_LEN,
+    check_fatal_err(fread(key, 1, MASTER_KEY_LEN, f) != MASTER_KEY_LEN,
                     "cannot read key from file.");
     fclose(f);
 }
@@ -57,30 +56,33 @@ void *t3fc_malloc(size_t s) {
     return buf;
 }
 
-void encrypt(FILE *input, FILE *output, uint8_t *key);
+void encrypt(FILE *input, FILE *output, unsigned char *key);
 void encrypt_chunk(unsigned char *chunk, size_t chunk_len, FILE *input,
                    FILE *output, hc256_ctx_t *hc256_ctx, ThreefishKey_t *t3f_x,
                    SkeinCtx_t *skein_x);
-void decrypt(FILE *input, FILE *output, uint8_t *key);
+void decrypt(FILE *input, FILE *output, unsigned char *key);
 void decrypt_chunk(unsigned char *chunk, size_t chunk_len, FILE *input,
                    FILE *output, hc256_ctx_t *hc256_ctx, ThreefishKey_t *t3f_x,
                    SkeinCtx_t *skein_x);
-void prepare(uint8_t *enc_key, hc256_ctx_t *hc256_ctx, ThreefishKey_t *t3f_x,
-             SkeinCtx_t *skein_x);
+void prepare(unsigned char *enc_key, hc256_ctx_t *hc256_ctx,
+             ThreefishKey_t *t3f_x, SkeinCtx_t *skein_x);
 
 int main(int argc, char *argv[]) {
 
-    if (argc == 2 && strcmp(argv[1], "-mk") == 0) {
-        randombytes(key, KEY_LEN);
-        check_fatal_err(fwrite(key, 1, KEY_LEN, stdout) != KEY_LEN,
-                        "cannot write key to file.");
+    unsigned char master_key[MASTER_KEY_LEN];
+
+    if (argc == 3 && strcmp(argv[1], "-mk") == 0) {
+        randombytes(master_key, MASTER_KEY_LEN);
+        FILE *master_key_file = t3fc_fopen(argv[2], "wb");
+        check_fatal_err(fwrite(master_key, 1, MASTER_KEY_LEN, master_key_file) != MASTER_KEY_LEN,
+                        "cannot write master key to file.");
 
     } else if (argc == 8 &&
                (strcmp(argv[1], "-e") == 0 || strcmp(argv[1], "-d") == 0) &&
                strcmp(argv[2], "-k") == 0 && strcmp(argv[4], "-i") == 0 &&
                strcmp(argv[6], "-o") == 0) {
 
-        get_key_from_file(argv[3], key);
+        get_key_from_file(argv[3], master_key);
         if (stb_fexists(argv[7])) {
             char yn;
             do {
@@ -95,9 +97,9 @@ int main(int argc, char *argv[]) {
         FILE *input = t3fc_fopen(argv[5], "rb");
         FILE *output = t3fc_fopen(argv[7], "wb");
         if (strcmp(argv[1], "-e") == 0) {
-            encrypt(input, output, key);
+            encrypt(input, output, master_key);
         } else if (strcmp(argv[1], "-d") == 0) {
-            decrypt(input, output, key);
+            decrypt(input, output, master_key);
         }
         fclose(input);
         fclose(output);
@@ -109,38 +111,38 @@ int main(int argc, char *argv[]) {
     return EXIT_SUCCESS;
 }
 
-void prepare(uint8_t *enc_key, hc256_ctx_t *hc256_ctx, ThreefishKey_t *t3f_x,
-             SkeinCtx_t *skein_x) {
+void prepare(unsigned char *enc_key, hc256_ctx_t *hc256_ctx,
+             ThreefishKey_t *t3f_x, SkeinCtx_t *skein_x) {
 
-    uint8_t hc256_kiv[HC256_LEN];
-    memcpy(hc256_kiv, enc_key, HC256_LEN);
+    unsigned char hc256_kiv[HC256_KIV_LEN];
+    memcpy(hc256_kiv, enc_key, HC256_KIV_LEN);
     hc256_set_kiv(hc256_ctx, hc256_kiv);
 
-    uint8_t t3f_key[T3F_KEY_LEN];
-    uint8_t t3f_tweak[TWEAK_LEN];
-    memcpy(t3f_key, &enc_key[HC256_LEN], T3F_KEY_LEN);
-    memcpy(t3f_tweak, &enc_key[HC256_LEN + T3F_KEY_LEN], TWEAK_LEN);
+    unsigned char t3f_key[T3F_KEY_LEN];
+    unsigned char t3f_tweak[T3F_TWEAK_LEN];
+    memcpy(t3f_key, &enc_key[HC256_KIV_LEN], T3F_KEY_LEN);
+    memcpy(t3f_tweak, &enc_key[HC256_KIV_LEN + T3F_KEY_LEN], T3F_TWEAK_LEN);
     threefishSetKey(t3f_x, Threefish1024, (uint64_t *)t3f_key,
                     (uint64_t *)t3f_tweak);
 
     skeinCtxPrepare(skein_x, Skein512);
-    uint8_t skein_mac_key[SKEIN_MAC_LEN];
-    memcpy(skein_mac_key, &enc_key[HC256_LEN + T3F_KEY_LEN + TWEAK_LEN],
+    unsigned char skein_mac_key[SKEIN_MAC_LEN];
+    memcpy(skein_mac_key, &enc_key[HC256_KIV_LEN + T3F_KEY_LEN + T3F_TWEAK_LEN],
            SKEIN_MAC_LEN);
     skeinMacInit(skein_x, skein_mac_key, SKEIN_MAC_LEN, Skein512);
 }
 
-void encrypt(FILE *input, FILE *output, uint8_t *key) {
+void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
 
     check_fatal_err(fwrite(header, 1, HEADER_LEN, output) != HEADER_LEN,
                     "cannot write header.");
-    uint8_t salt[SALT_LEN];
+    unsigned char salt[SALT_LEN];
     randombytes(salt, SALT_LEN);
     check_fatal_err(fwrite(salt, 1, SALT_LEN, output) != SALT_LEN,
                     "cannot write salt.");
 
-    uint8_t enc_key[ENC_KEY_LEN];
-    check_fatal_err(argon2id_hash_raw(T, M, P, key, KEY_LEN, salt, SALT_LEN,
+    unsigned char enc_key[ENC_KEY_LEN];
+    check_fatal_err(argon2id_hash_raw(T, M, P, master_key, MASTER_KEY_LEN, salt, SALT_LEN,
                                       enc_key, ENC_KEY_LEN) != ARGON2_OK,
                     "Argon2 failed.");
 
@@ -178,6 +180,7 @@ void encrypt(FILE *input, FILE *output, uint8_t *key) {
 void encrypt_chunk(unsigned char *chunk, size_t chunk_len, FILE *input,
                    FILE *output, hc256_ctx_t *hc256_ctx, ThreefishKey_t *t3f_x,
                    SkeinCtx_t *skein_x) {
+
     unsigned char tmp[T3F_BLOCK_LEN];
     unsigned char ctr[T3F_BLOCK_LEN];
     unsigned char tmp_out[T3F_BLOCK_LEN];
@@ -207,19 +210,19 @@ void encrypt_chunk(unsigned char *chunk, size_t chunk_len, FILE *input,
     }
 }
 
-void decrypt(FILE *input, FILE *output, uint8_t *key) {
+void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
 
-    uint8_t in_header[HEADER_LEN];
+    unsigned char in_header[HEADER_LEN];
     check_fatal_err(fread(in_header, 1, HEADER_LEN, input) != HEADER_LEN,
                     "cannot read header.");
     check_fatal_err(memcmp(in_header, header, HEADER_LEN) != 0,
                     "wrong header.");
-    uint8_t salt[SALT_LEN];
+    unsigned char salt[SALT_LEN];
     check_fatal_err(fread(salt, 1, SALT_LEN, input) != SALT_LEN,
                     "cannot read salt.");
 
-    uint8_t enc_key[ENC_KEY_LEN];
-    check_fatal_err(argon2id_hash_raw(T, M, P, key, KEY_LEN, salt, SALT_LEN,
+    unsigned char enc_key[ENC_KEY_LEN];
+    check_fatal_err(argon2id_hash_raw(T, M, P, master_key, MASTER_KEY_LEN, salt, SALT_LEN,
                                       enc_key, ENC_KEY_LEN) != ARGON2_OK,
                     "Argon2 failed.");
 
@@ -264,6 +267,7 @@ void decrypt(FILE *input, FILE *output, uint8_t *key) {
 void decrypt_chunk(unsigned char *chunk, size_t chunk_len, FILE *input,
                    FILE *output, hc256_ctx_t *hc256_ctx, ThreefishKey_t *t3f_x,
                    SkeinCtx_t *skein_x) {
+
     unsigned char tmp[T3F_BLOCK_LEN];
     unsigned char ctr[T3F_BLOCK_LEN];
     unsigned char tmp_out[T3F_BLOCK_LEN];
