@@ -2,4 +2,4 @@
 
 Dependency: [libsodium](https://github.com/pbtrung/libsodium)
 
-Compile: `gcc main.c skein3fish/*.c -O3 -o t3fc -lpthread -lsodium`
+Compile: `gcc main.c skein3fish/*.c -O3 -o t3fc -lsodium`
