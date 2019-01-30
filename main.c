@@ -70,6 +70,9 @@ void decrypt(FILE *input, FILE *output, unsigned char *key);
 void prepare(unsigned char *enc_key,
              crypto_secretstream_xchacha20poly1305_state *x20_st,
              ThreefishKey_t *t3f_x, SkeinCtx_t *skein_x, int enc);
+void t3f_process_chunk(ThreefishKey_t *t3f_x, unsigned char *chunk,
+                       size_t chunk_len, unsigned char *ctr_nonce);
+unsigned char *make_enc_key(unsigned char *master_key, unsigned char *salt);
 
 int main(int argc, char *argv[]) {
 
@@ -141,7 +144,18 @@ void prepare(unsigned char *enc_key,
         SKEIN_MAC_LEN, Skein512);
 }
 
+unsigned char *make_enc_key(unsigned char *master_key, unsigned char *salt) {
+    unsigned char *enc_key = t3fc_sodium_malloc(ENC_KEY_LEN);
+    check_fatal_err(crypto_pwhash(enc_key, ENC_KEY_LEN, master_key,
+                                  MASTER_KEY_LEN, salt, T, M,
+                                  crypto_pwhash_ALG_ARGON2ID13) != 0,
+                    "Argon2 failed.");
+    return enc_key;
+}
+
 void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
+
+    assert(SALT_LEN == 32U);
 
     check_fatal_err(fwrite(header, 1, HEADER_LEN, output) != HEADER_LEN,
                     "cannot write header.");
@@ -150,12 +164,7 @@ void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
     check_fatal_err(fwrite(salt, 1, SALT_LEN, output) != SALT_LEN,
                     "cannot write salt.");
 
-    assert(SALT_LEN == 32U);
-    unsigned char *enc_key = t3fc_sodium_malloc(ENC_KEY_LEN);
-    check_fatal_err(crypto_pwhash(enc_key, ENC_KEY_LEN, master_key,
-                                  MASTER_KEY_LEN, salt, T, M,
-                                  crypto_pwhash_ALG_ARGON2ID13) != 0,
-                    "Argon2 failed.");
+    unsigned char *enc_key = make_enc_key(master_key, salt);
 
     crypto_secretstream_xchacha20poly1305_state x20_st;
     ThreefishKey_t *t3f_x = t3fc_malloc(sizeof(ThreefishKey_t));
@@ -186,26 +195,8 @@ void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
                         "cannot read input.");
         eof = feof(input);
         tag = eof ? crypto_secretstream_xchacha20poly1305_TAG_FINAL : 0;
-        unsigned char tmp[T3F_BLOCK_LEN];
 
-        uint32_t i = 0;
-        size_t in_len = read_len;
-        for (; in_len >= T3F_BLOCK_LEN; ++i, in_len -= T3F_BLOCK_LEN) {
-            sodium_increment(ctr_nonce, CTR_NONCE_LEN);
-            threefishEncryptBlockBytes(t3f_x, ctr_nonce, tmp);
-            for (uint32_t j = 0; j < T3F_BLOCK_LEN; ++j) {
-                chunk[i * T3F_BLOCK_LEN + j] =
-                    tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
-            }
-        }
-        if (in_len > 0) {
-            sodium_increment(ctr_nonce, CTR_NONCE_LEN);
-            threefishEncryptBlockBytes(t3f_x, ctr_nonce, tmp);
-            for (uint32_t j = 0; j < in_len; ++j) {
-                chunk[i * T3F_BLOCK_LEN + j] =
-                    tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
-            }
-        }
+        t3f_process_chunk(t3f_x, chunk, read_len, ctr_nonce);
 
         size_t x20_buf_len =
             read_len + crypto_secretstream_xchacha20poly1305_ABYTES;
@@ -230,6 +221,8 @@ void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
 
 void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
 
+    assert(SALT_LEN == 32U);
+
     unsigned char in_header[HEADER_LEN];
     check_fatal_err(fread(in_header, 1, HEADER_LEN, input) != HEADER_LEN,
                     "cannot read header.");
@@ -243,11 +236,7 @@ void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
                         X20_HEADER_LEN,
                     "cannot read X20 header.");
 
-    unsigned char *enc_key = t3fc_sodium_malloc(ENC_KEY_LEN);
-    check_fatal_err(crypto_pwhash(enc_key, ENC_KEY_LEN, master_key,
-                                  MASTER_KEY_LEN, salt, T, M,
-                                  crypto_pwhash_ALG_ARGON2ID13) != 0,
-                    "Argon2 failed.");
+    unsigned char *enc_key = make_enc_key(master_key, salt);
 
     crypto_secretstream_xchacha20poly1305_state x20_st;
     ThreefishKey_t *t3f_x = t3fc_malloc(sizeof(ThreefishKey_t));
@@ -259,7 +248,7 @@ void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
     skeinUpdate(skein_x, x20_header, X20_HEADER_LEN);
 
     unsigned char *chunk = t3fc_malloc(CHUNK_LEN);
-    unsigned long long out_len;
+    unsigned long long chunk_len;
     size_t x20_buf_len =
         CHUNK_LEN + crypto_secretstream_xchacha20poly1305_ABYTES;
     unsigned char *x20_buf_in = t3fc_malloc(x20_buf_len);
@@ -278,57 +267,54 @@ void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
                         "cannot read input.");
         eof = feof(input);
         if (eof && read_len > SKEIN_MAC_LEN) {
-            check_fatal_err(crypto_secretstream_xchacha20poly1305_pull(
-                                &x20_st, chunk, &out_len, &tag, x20_buf_in,
-                                read_len - SKEIN_MAC_LEN, NULL, 0) != 0,
-                            "corrupted chunk.");
-            skeinUpdate(skein_x, x20_buf_in, read_len - SKEIN_MAC_LEN);
+            read_len -= SKEIN_MAC_LEN;
         } else if (read_len == SKEIN_MAC_LEN) {
+            read_len = 0;
             break;
-        } else {
-            check_fatal_err(crypto_secretstream_xchacha20poly1305_pull(
-                                &x20_st, chunk, &out_len, &tag, x20_buf_in,
-                                read_len, NULL, 0) != 0,
-                            "corrupted chunk.");
-            skeinUpdate(skein_x, x20_buf_in, read_len);
         }
+        check_fatal_err(crypto_secretstream_xchacha20poly1305_pull(
+                            &x20_st, chunk, &chunk_len, &tag, x20_buf_in,
+                            read_len, NULL, 0) != 0,
+                        "corrupted chunk.");
+        skeinUpdate(skein_x, x20_buf_in, read_len);
         check_fatal_err(
             tag == crypto_secretstream_xchacha20poly1305_TAG_FINAL && !eof,
             "premature end (end of file reached before the end of the "
             "stream).");
 
-        unsigned char tmp[T3F_BLOCK_LEN];
-        uint32_t i = 0;
-        size_t in_len = out_len;
-        for (; in_len >= T3F_BLOCK_LEN; ++i, in_len -= T3F_BLOCK_LEN) {
-            sodium_increment(ctr_nonce, CTR_NONCE_LEN);
-            threefishEncryptBlockBytes(t3f_x, ctr_nonce, tmp);
-            for (uint32_t j = 0; j < T3F_BLOCK_LEN; ++j) {
-                chunk[i * T3F_BLOCK_LEN + j] =
-                    tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
-            }
-        }
-        if (in_len > 0) {
-            sodium_increment(ctr_nonce, CTR_NONCE_LEN);
-            threefishEncryptBlockBytes(t3f_x, ctr_nonce, tmp);
-            for (uint32_t j = 0; j < in_len; ++j) {
-                chunk[i * T3F_BLOCK_LEN + j] =
-                    tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
-            }
-        }
-        check_fatal_err(fwrite(chunk, 1, out_len, output) != out_len,
+        t3f_process_chunk(t3f_x, chunk, chunk_len, ctr_nonce);
+        check_fatal_err(fwrite(chunk, 1, chunk_len, output) != chunk_len,
                         "cannot write to file.");
     } while (!eof);
 
     unsigned char hash[SKEIN_MAC_LEN];
     skeinFinal(skein_x, hash);
-    check_fatal_err(
-        memcmp(hash, &x20_buf_in[read_len - SKEIN_MAC_LEN], SKEIN_MAC_LEN) != 0,
-        "wrong Skein MAC.");
+    check_fatal_err(memcmp(hash, &x20_buf_in[read_len], SKEIN_MAC_LEN) != 0,
+                    "wrong Skein MAC.");
 
     sodium_free(enc_key);
     free(t3f_x);
     free(x20_buf_in);
     free(chunk);
     free(skein_x);
+}
+
+void t3f_process_chunk(ThreefishKey_t *t3f_x, unsigned char *chunk,
+                       size_t chunk_len, unsigned char *ctr_nonce) {
+    uint32_t i = 0;
+    size_t in_len = chunk_len;
+    for (; in_len >= T3F_BLOCK_LEN; ++i, in_len -= T3F_BLOCK_LEN) {
+        threefishEncryptBlockBytes(t3f_x, ctr_nonce, ctr_nonce);
+        for (uint32_t j = 0; j < T3F_BLOCK_LEN; ++j) {
+            chunk[i * T3F_BLOCK_LEN + j] =
+                ctr_nonce[j] ^ chunk[i * T3F_BLOCK_LEN + j];
+        }
+    }
+    if (in_len > 0) {
+        threefishEncryptBlockBytes(t3f_x, ctr_nonce, ctr_nonce);
+        for (uint32_t j = 0; j < in_len; ++j) {
+            chunk[i * T3F_BLOCK_LEN + j] =
+                ctr_nonce[j] ^ chunk[i * T3F_BLOCK_LEN + j];
+        }
+    }
 }
