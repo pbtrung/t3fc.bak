@@ -1,6 +1,5 @@
 /* This program gives the optimized implementation of HC-256 for 32-bit platform
 
-   The docuement of HC-256 is available at:
    1) Hongjun Wu. ``A New Stream Cipher HC-256.'' Fast Software Encryption -- FSE 2004, LNCS 3017, pp. 226-244, Springer-Verlag 2004.
    2) eSTREAM website:  http://www.ecrypt.eu.org/stream/hcp3.html
 
@@ -231,7 +230,7 @@ void UpdateSixteenSteps(HC256_State *state)
 }
 
 /*initialization of the cipher, the key and iv are used to update the state*/
-void Initialization(HC256_State *state, uint8 *key, uint8 *iv) 
+void hc256_init(HC256_State *state, uint8 *key, uint8 *iv) 
 {   
       uint32 i;
 
@@ -266,7 +265,7 @@ void Initialization(HC256_State *state, uint8 *key, uint8 *iv)
    three inputs to this function: cipher state, message, the message length in bytes
    one output:  ciphertext
 */
-void EncryptMessage(HC256_State *state, uint8 *message, uint8 *ciphertext, uint64 msglength)
+void hc256_process_chunk(HC256_State *state, uint8 *message, uint8 *ciphertext, uint64 msglength)
 {
       uint64 i;
       uint32 j;
@@ -297,9 +296,9 @@ void HC256(uint8 *key, uint8 *iv, uint8 *message,uint8 *ciphertext, uint64 msgle
       HC256_State state;
 
       /*initializing the state*/
-      Initialization(&state,key,iv);
+      hc256_init(&state,key,iv);
 
       /*encrypt a message*/
-      EncryptMessage(&state,message,ciphertext,msglength);
+      hc256_process_chunk(&state,message,ciphertext,msglength);
 }
 
