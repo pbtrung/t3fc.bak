@@ -39,6 +39,72 @@ void check_fatal_err(int cond, char *msg) {
     }
 }
 
+int sodium_pad(size_t *padded_buflen_p, unsigned char *buf,
+               size_t unpadded_buflen, size_t blocksize, size_t max_buflen) {
+    unsigned char *tail;
+    size_t i;
+    size_t xpadlen;
+    size_t xpadded_len;
+    volatile unsigned char mask;
+    unsigned char barrier_mask;
+
+    if (blocksize <= 0U) {
+        return -1;
+    }
+    xpadlen = blocksize - 1U;
+    if ((blocksize & (blocksize - 1U)) == 0U) {
+        xpadlen -= unpadded_buflen & (blocksize - 1U);
+    } else {
+        xpadlen -= unpadded_buflen % blocksize;
+    }
+    check_fatal_err((size_t)SIZE_MAX - unpadded_buflen <= xpadlen,
+                    "cannot add padding.");
+    xpadded_len = unpadded_buflen + xpadlen;
+    if (xpadded_len >= max_buflen) {
+        return -1;
+    }
+    tail = &buf[xpadded_len];
+    if (padded_buflen_p != NULL) {
+        *padded_buflen_p = xpadded_len + 1U;
+    }
+    mask = 0U;
+    for (i = 0; i < blocksize; i++) {
+        barrier_mask = (unsigned char)(((i ^ xpadlen) - 1U) >>
+                                       ((sizeof(size_t) - 1) * CHAR_BIT));
+        *(tail - i) = ((*(tail - i)) & mask) | (0x80 & barrier_mask);
+        mask |= barrier_mask;
+    }
+    return 0;
+}
+
+int sodium_unpad(size_t *unpadded_buflen_p, const unsigned char *buf,
+                 size_t padded_buflen, size_t blocksize) {
+    const unsigned char *tail;
+    unsigned char acc = 0U;
+    unsigned char c;
+    unsigned char valid = 0U;
+    volatile size_t pad_len = 0U;
+    size_t i;
+    size_t is_barrier;
+
+    if (padded_buflen < blocksize || blocksize <= 0U) {
+        return -1;
+    }
+    tail = &buf[padded_buflen - 1U];
+
+    for (i = 0U; i < blocksize; i++) {
+        c = *(tail - i);
+        is_barrier =
+            (((acc - 1U) & (pad_len - 1U) & ((c ^ 0x80) - 1U)) >> 8) & 1U;
+        acc |= c;
+        pad_len |= i & (1U + ~is_barrier);
+        valid |= (unsigned char)is_barrier;
+    }
+    *unpadded_buflen_p = padded_buflen - 1U - pad_len;
+
+    return (int)(valid - 1U);
+}
+
 FILE *t3fc_fopen(const char *path, const char *flags) {
     FILE *f = stb__fopen(path, flags);
     check_fatal_err(f == NULL, "cannot open file.");
@@ -161,22 +227,25 @@ void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
 
     unsigned char *chunk = t3fc_malloc(CHUNK_LEN);
     size_t chunk_len = 0;
+    size_t padded_len = 0;
     unsigned char t3f_iv[T3F_IV_LEN];
     memcpy(t3f_iv,
            &enc_key[HC256_KEY_LEN + HC256_IV_LEN + T3F_KEY_LEN + T3F_TWEAK_LEN +
                     SKEIN_MAC_LEN],
            T3F_IV_LEN);
-    size_t infile_len = stb_filelen(input);
-    while (infile_len > 0) {
-        chunk_len = fread(chunk, 1, CHUNK_LEN, input);
+
+    while ((chunk_len = fread(chunk, sizeof(unsigned char), CHUNK_LEN, input)) > 0) {
         check_fatal_err(chunk_len != CHUNK_LEN && ferror(input),
                         "cannot read input.");
+        if (chunk_len < CHUNK_LEN) {
+            check_fatal_err(sodium_pad(&padded_len, chunk, chunk_len, T3F_BLOCK_LEN, CHUNK_LEN) != 0, "buffer is not large enough.");
+            chunk_len = padded_len;
+        }
         t3f_encrypt_chunk(t3f_x, chunk, chunk_len, t3f_iv);
         hc256_process_chunk(&hc256_st, chunk, chunk, chunk_len);
         skeinUpdate(skein_x, chunk, chunk_len);
         check_fatal_err(fwrite(chunk, 1, chunk_len, output) != chunk_len,
                         "cannot write to file.");
-        infile_len -= chunk_len;
     }
 
     unsigned char hash[SKEIN_MAC_LEN];
@@ -211,83 +280,73 @@ void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
     skeinUpdate(skein_x, salt, SALT_LEN);
 
     unsigned char *chunk = t3fc_malloc(CHUNK_LEN);
+    unsigned char *read_hash = t3fc_malloc(SKEIN_MAC_LEN);
     unsigned char t3f_iv[T3F_IV_LEN];
     memcpy(t3f_iv,
            &enc_key[HC256_KEY_LEN + HC256_IV_LEN + T3F_KEY_LEN + T3F_TWEAK_LEN +
                     SKEIN_MAC_LEN],
            T3F_IV_LEN);
-    size_t infile_len =
-        stb_filelen(input) - (HEADER_LEN + SALT_LEN + SKEIN_MAC_LEN);
-    size_t chunk_len = CHUNK_LEN;
-    size_t num_read = infile_len / CHUNK_LEN + (infile_len % CHUNK_LEN != 0);
+    size_t chunk_len = 0;
+    size_t unpadded_len = CHUNK_LEN;
 
-    for (size_t i = 0; i < num_read; ++i) {
-        if (i == num_read - 1) {
-            chunk_len = infile_len - i * CHUNK_LEN;
-        }
-        chunk_len = fread(chunk, 1, chunk_len, input);
+    while ((chunk_len = fread(chunk, sizeof(unsigned char), CHUNK_LEN, input)) > 0) {
         check_fatal_err(chunk_len != CHUNK_LEN && ferror(input),
                         "cannot read input.");
+        if (chunk_len < CHUNK_LEN && chunk_len > SKEIN_MAC_LEN) {
+            chunk_len -= SKEIN_MAC_LEN;
+            memcpy(read_hash, &chunk[chunk_len], SKEIN_MAC_LEN);
+        } else if (chunk_len == SKEIN_MAC_LEN) {
+            memcpy(read_hash, chunk, SKEIN_MAC_LEN);
+            break;
+        }
         skeinUpdate(skein_x, chunk, chunk_len);
         hc256_process_chunk(&hc256_st, chunk, chunk, chunk_len);
         t3f_decrypt_chunk(t3f_x, chunk, chunk_len, t3f_iv);
-        check_fatal_err(fwrite(chunk, 1, chunk_len, output) != chunk_len,
+        if (chunk_len < CHUNK_LEN) {
+            check_fatal_err(sodium_unpad(&unpadded_len, chunk, chunk_len, T3F_BLOCK_LEN) != 0, "incorrect padding.");
+        }
+        check_fatal_err(fwrite(chunk, 1, unpadded_len, output) != unpadded_len,
                         "cannot write to file.");
     }
 
-    chunk_len = fread(chunk, 1, SKEIN_MAC_LEN, input);
-    check_fatal_err(chunk_len != SKEIN_MAC_LEN && ferror(input),
-                    "cannot read input.");
     unsigned char hash[SKEIN_MAC_LEN];
     skeinFinal(skein_x, hash);
-    check_fatal_err(memcmp(hash, chunk, SKEIN_MAC_LEN) != 0,
+    check_fatal_err(memcmp(hash, read_hash, SKEIN_MAC_LEN) != 0,
                     "wrong Skein MAC.");
 
     free(enc_key);
     free(t3f_x);
     free(chunk);
     free(skein_x);
+    free(read_hash);
 }
 
 void t3f_encrypt_chunk(ThreefishKey_t *t3f_x, unsigned char *chunk,
                        size_t chunk_len, unsigned char *t3f_iv) {
     uint32_t i = 0;
     for (; chunk_len >= T3F_BLOCK_LEN; ++i, chunk_len -= T3F_BLOCK_LEN) {
-        threefishEncryptBlockBytes(t3f_x, t3f_iv, t3f_iv);
         for (uint32_t j = 0; j < T3F_BLOCK_LEN; ++j) {
             chunk[i * T3F_BLOCK_LEN + j] =
                 t3f_iv[j] ^ chunk[i * T3F_BLOCK_LEN + j];
         }
+        threefishEncryptBlockBytes(t3f_x, &chunk[i * T3F_BLOCK_LEN], &chunk[i * T3F_BLOCK_LEN]);
         memcpy(t3f_iv, &chunk[i * T3F_BLOCK_LEN], T3F_BLOCK_LEN);
     }
-    if (chunk_len > 0) {
-        threefishEncryptBlockBytes(t3f_x, t3f_iv, t3f_iv);
-        for (uint32_t j = 0; j < chunk_len; ++j) {
-            chunk[i * T3F_BLOCK_LEN + j] =
-                t3f_iv[j] ^ chunk[i * T3F_BLOCK_LEN + j];
-        }
-    }
+    check_fatal_err(chunk_len != 0, "plaintext must be a multiple of the block size.");
 }
 
 void t3f_decrypt_chunk(ThreefishKey_t *t3f_x, unsigned char *chunk,
                        size_t chunk_len, unsigned char *t3f_iv) {
     uint32_t i = 0;
     unsigned char tmp[T3F_BLOCK_LEN];
-
     for (; chunk_len >= T3F_BLOCK_LEN; ++i, chunk_len -= T3F_BLOCK_LEN) {
         memcpy(tmp, &chunk[i * T3F_BLOCK_LEN], T3F_BLOCK_LEN);
-        threefishEncryptBlockBytes(t3f_x, t3f_iv, t3f_iv);
+        threefishDecryptBlockBytes(t3f_x, &chunk[i * T3F_BLOCK_LEN], &chunk[i * T3F_BLOCK_LEN]);
         for (uint32_t j = 0; j < T3F_BLOCK_LEN; ++j) {
             chunk[i * T3F_BLOCK_LEN + j] =
                 t3f_iv[j] ^ chunk[i * T3F_BLOCK_LEN + j];
         }
         memcpy(t3f_iv, tmp, T3F_BLOCK_LEN);
     }
-    if (chunk_len > 0) {
-        threefishEncryptBlockBytes(t3f_x, t3f_iv, t3f_iv);
-        for (uint32_t j = 0; j < chunk_len; ++j) {
-            chunk[i * T3F_BLOCK_LEN + j] =
-                t3f_iv[j] ^ chunk[i * T3F_BLOCK_LEN + j];
-        }
-    }
+    check_fatal_err(chunk_len != 0, "plaintext must be a multiple of the block size.");
 }
