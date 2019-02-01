@@ -1,6 +1,7 @@
+#include <sodium.h>
+
 #include "argon2/argon2.h"
 #include "hc256/hc256_opt32.h"
-#include "randombytes/randombytes.h"
 #include "skein3fish/skeinApi.h"
 #include "skein3fish/threefishApi.h"
 
@@ -39,72 +40,6 @@ void check_fatal_err(int cond, char *msg) {
     }
 }
 
-int sodium_pad(size_t *padded_buflen_p, unsigned char *buf,
-               size_t unpadded_buflen, size_t blocksize, size_t max_buflen) {
-    unsigned char *tail;
-    size_t i;
-    size_t xpadlen;
-    size_t xpadded_len;
-    volatile unsigned char mask;
-    unsigned char barrier_mask;
-
-    if (blocksize <= 0U) {
-        return -1;
-    }
-    xpadlen = blocksize - 1U;
-    if ((blocksize & (blocksize - 1U)) == 0U) {
-        xpadlen -= unpadded_buflen & (blocksize - 1U);
-    } else {
-        xpadlen -= unpadded_buflen % blocksize;
-    }
-    check_fatal_err((size_t)SIZE_MAX - unpadded_buflen <= xpadlen,
-                    "cannot add padding.");
-    xpadded_len = unpadded_buflen + xpadlen;
-    if (xpadded_len >= max_buflen) {
-        return -1;
-    }
-    tail = &buf[xpadded_len];
-    if (padded_buflen_p != NULL) {
-        *padded_buflen_p = xpadded_len + 1U;
-    }
-    mask = 0U;
-    for (i = 0; i < blocksize; i++) {
-        barrier_mask = (unsigned char)(((i ^ xpadlen) - 1U) >>
-                                       ((sizeof(size_t) - 1) * CHAR_BIT));
-        *(tail - i) = ((*(tail - i)) & mask) | (0x80 & barrier_mask);
-        mask |= barrier_mask;
-    }
-    return 0;
-}
-
-int sodium_unpad(size_t *unpadded_buflen_p, const unsigned char *buf,
-                 size_t padded_buflen, size_t blocksize) {
-    const unsigned char *tail;
-    unsigned char acc = 0U;
-    unsigned char c;
-    unsigned char valid = 0U;
-    volatile size_t pad_len = 0U;
-    size_t i;
-    size_t is_barrier;
-
-    if (padded_buflen < blocksize || blocksize <= 0U) {
-        return -1;
-    }
-    tail = &buf[padded_buflen - 1U];
-
-    for (i = 0U; i < blocksize; i++) {
-        c = *(tail - i);
-        is_barrier =
-            (((acc - 1U) & (pad_len - 1U) & ((c ^ 0x80) - 1U)) >> 8) & 1U;
-        acc |= c;
-        pad_len |= i & (1U + ~is_barrier);
-        valid |= (unsigned char)is_barrier;
-    }
-    *unpadded_buflen_p = padded_buflen - 1U - pad_len;
-
-    return (int)(valid - 1U);
-}
-
 FILE *t3fc_fopen(const char *path, const char *flags) {
     FILE *f = stb__fopen(path, flags);
     check_fatal_err(f == NULL, "cannot open file.");
@@ -118,6 +53,12 @@ void get_key_from_file(const char *key_file, unsigned char *key) {
     check_fatal_err(fread(key, 1, MASTER_KEY_LEN, f) != MASTER_KEY_LEN,
                     "cannot read key from file.");
     fclose(f);
+}
+
+void *t3fc_sodium_malloc(size_t s) {
+    void *buf = sodium_malloc(s);
+    check_fatal_err(buf == NULL, "cannot allocate memory.");
+    return buf;
 }
 
 void *t3fc_malloc(size_t s) {
@@ -138,10 +79,11 @@ unsigned char *make_enc_key(unsigned char *master_key, unsigned char *salt);
 
 int main(int argc, char *argv[]) {
 
-    unsigned char *master_key = t3fc_malloc(MASTER_KEY_LEN);
+    check_fatal_err(sodium_init() < 0, "cannot initialize libsodium.");
+    unsigned char *master_key = t3fc_sodium_malloc(MASTER_KEY_LEN);
 
     if (argc == 3 && strcmp(argv[1], "-mk") == 0) {
-        randombytes(master_key, MASTER_KEY_LEN);
+        randombytes_buf(master_key, MASTER_KEY_LEN);
         FILE *master_key_file = t3fc_fopen(argv[2], "wb");
         check_fatal_err(fwrite(master_key, 1, MASTER_KEY_LEN,
                                master_key_file) != MASTER_KEY_LEN,
@@ -179,7 +121,7 @@ int main(int argc, char *argv[]) {
         check_fatal_err(1, "unknown options.");
     }
 
-    free(master_key);
+    sodium_free(master_key);
     return EXIT_SUCCESS;
 }
 
@@ -199,7 +141,7 @@ void prepare(unsigned char *enc_key, HC256_State *hc256_st,
 }
 
 unsigned char *make_enc_key(unsigned char *master_key, unsigned char *salt) {
-    unsigned char *enc_key = t3fc_malloc(ENC_KEY_LEN);
+    unsigned char *enc_key = t3fc_sodium_malloc(ENC_KEY_LEN);
     check_fatal_err(argon2id_hash_raw(T, M, P, master_key, MASTER_KEY_LEN, salt,
                                       SALT_LEN, enc_key,
                                       ENC_KEY_LEN) != ARGON2_OK,
@@ -212,20 +154,19 @@ void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
     check_fatal_err(fwrite(header, 1, HEADER_LEN, output) != HEADER_LEN,
                     "cannot write header.");
     unsigned char salt[SALT_LEN];
-    randombytes(salt, SALT_LEN);
+    randombytes_buf(salt, SALT_LEN);
     check_fatal_err(fwrite(salt, 1, SALT_LEN, output) != SALT_LEN,
                     "cannot write salt.");
 
     unsigned char *enc_key = make_enc_key(master_key, salt);
-
-    HC256_State hc256_st;
+    HC256_State *hc256_st = t3fc_malloc(sizeof(HC256_State));
     ThreefishKey_t *t3f_x = t3fc_malloc(sizeof(ThreefishKey_t));
     SkeinCtx_t *skein_x = t3fc_malloc(sizeof(SkeinCtx_t));
-    prepare(enc_key, &hc256_st, t3f_x, skein_x);
+    prepare(enc_key, hc256_st, t3f_x, skein_x);
     skeinUpdate(skein_x, header, HEADER_LEN);
     skeinUpdate(skein_x, salt, SALT_LEN);
 
-    unsigned char *chunk = t3fc_malloc(CHUNK_LEN);
+    unsigned char *chunk = t3fc_sodium_malloc(CHUNK_LEN);
     size_t chunk_len = 0;
     size_t padded_len = 0;
     unsigned char t3f_iv[T3F_IV_LEN];
@@ -242,7 +183,7 @@ void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
             chunk_len = padded_len;
         }
         t3f_encrypt_chunk(t3f_x, chunk, chunk_len, t3f_iv);
-        hc256_process_chunk(&hc256_st, chunk, chunk, chunk_len);
+        hc256_process_chunk(hc256_st, chunk, chunk, chunk_len);
         skeinUpdate(skein_x, chunk, chunk_len);
         check_fatal_err(fwrite(chunk, 1, chunk_len, output) != chunk_len,
                         "cannot write to file.");
@@ -250,12 +191,15 @@ void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
 
     unsigned char hash[SKEIN_MAC_LEN];
     skeinFinal(skein_x, hash);
-    check_fatal_err(fwrite(hash, 1, SKEIN_MAC_LEN, output) != SKEIN_MAC_LEN,
-                    "cannot write Skein MAC.");
+    check_fatal_err(fwrite(hash, 1, SKEIN_MAC_LEN, output) != SKEIN_MAC_LEN, "cannot write Skein MAC.");
 
-    free(enc_key);
+    sodium_free(enc_key);
+    sodium_free(chunk);
+    sodium_memzero(t3f_x, sizeof(ThreefishKey_t));
     free(t3f_x);
-    free(chunk);
+    sodium_memzero(hc256_st, sizeof(HC256_State));
+    free(hc256_st);
+    sodium_memzero(skein_x, sizeof(SkeinCtx_t));
     free(skein_x);
 }
 
@@ -264,22 +208,20 @@ void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
     unsigned char in_header[HEADER_LEN];
     check_fatal_err(fread(in_header, 1, HEADER_LEN, input) != HEADER_LEN,
                     "cannot read header.");
-    check_fatal_err(memcmp(in_header, header, HEADER_LEN) != 0,
-                    "wrong header.");
+    check_fatal_err(sodium_memcmp(in_header, header, HEADER_LEN) != 0, "wrong header.");
     unsigned char salt[SALT_LEN];
     check_fatal_err(fread(salt, 1, SALT_LEN, input) != SALT_LEN,
                     "cannot read salt.");
 
     unsigned char *enc_key = make_enc_key(master_key, salt);
-
-    HC256_State hc256_st;
+    HC256_State *hc256_st = t3fc_malloc(sizeof(HC256_State));
     ThreefishKey_t *t3f_x = t3fc_malloc(sizeof(ThreefishKey_t));
     SkeinCtx_t *skein_x = t3fc_malloc(sizeof(SkeinCtx_t));
-    prepare(enc_key, &hc256_st, t3f_x, skein_x);
+    prepare(enc_key, hc256_st, t3f_x, skein_x);
     skeinUpdate(skein_x, in_header, HEADER_LEN);
     skeinUpdate(skein_x, salt, SALT_LEN);
 
-    unsigned char *chunk = t3fc_malloc(CHUNK_LEN);
+    unsigned char *chunk = t3fc_sodium_malloc(CHUNK_LEN);
     unsigned char *read_hash = t3fc_malloc(SKEIN_MAC_LEN);
     unsigned char t3f_iv[T3F_IV_LEN];
     memcpy(t3f_iv,
@@ -300,7 +242,7 @@ void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
             break;
         }
         skeinUpdate(skein_x, chunk, chunk_len);
-        hc256_process_chunk(&hc256_st, chunk, chunk, chunk_len);
+        hc256_process_chunk(hc256_st, chunk, chunk, chunk_len);
         t3f_decrypt_chunk(t3f_x, chunk, chunk_len, t3f_iv);
         if (chunk_len < CHUNK_LEN) {
             check_fatal_err(sodium_unpad(&unpadded_len, chunk, chunk_len, T3F_BLOCK_LEN) != 0, "incorrect padding.");
@@ -311,12 +253,15 @@ void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
 
     unsigned char hash[SKEIN_MAC_LEN];
     skeinFinal(skein_x, hash);
-    check_fatal_err(memcmp(hash, read_hash, SKEIN_MAC_LEN) != 0,
-                    "wrong Skein MAC.");
+    check_fatal_err(sodium_memcmp(hash, read_hash, SKEIN_MAC_LEN) != 0, "wrong Skein MAC.");
 
-    free(enc_key);
+    sodium_free(enc_key);
+    sodium_free(chunk);
+    sodium_memzero(t3f_x, sizeof(ThreefishKey_t));
     free(t3f_x);
-    free(chunk);
+    sodium_memzero(hc256_st, sizeof(HC256_State));
+    free(hc256_st);
+    sodium_memzero(skein_x, sizeof(SkeinCtx_t));
     free(skein_x);
     free(read_hash);
 }
