@@ -161,7 +161,7 @@ void encrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
     nowide::cout << "argon2  " << argon2 << std::endl;
 
     CryptoPP::ConstByteArrayParameter tweak(&enc_key[T3F_KEY_LEN],
-                                            T3F_TWEAK_LEN);
+                                            T3F_TWEAK_LEN, false);
     CryptoPP::AlgorithmParameters t3f_params =
         CryptoPP::MakeParameters(CryptoPP::Name::Tweak(), tweak);
     CryptoPP::Threefish1024::Encryption t3f(enc_key, T3F_KEY_LEN);
