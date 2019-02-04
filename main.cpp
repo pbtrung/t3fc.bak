@@ -153,8 +153,8 @@ void encrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
     timer.StartTimer();
 
     check_fatal_err(argon2id_hash_raw(T, M, P, master_key.data(),
-                                      MASTER_KEY_LEN, salt, SALT_LEN, enc_key.data(),
-                                      ENC_KEY_LEN) != ARGON2_OK,
+                                      MASTER_KEY_LEN, salt, SALT_LEN,
+                                      enc_key.data(), ENC_KEY_LEN) != ARGON2_OK,
                     "Argon2 failed.");
 
     double argon2 = timer.ElapsedTimeAsDouble();
