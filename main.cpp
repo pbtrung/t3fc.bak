@@ -147,13 +147,13 @@ void encrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
     CryptoPP::OS_GenerateRandomBlock(false, salt, SALT_LEN);
     out_file.write((char *)salt, SALT_LEN);
 
-    unsigned char enc_key[ENC_KEY_LEN];
+    CryptoPP::SecByteBlock enc_key(ENC_KEY_LEN);
 
     CryptoPP::Timer timer;
     timer.StartTimer();
 
     check_fatal_err(argon2id_hash_raw(T, M, P, master_key.data(),
-                                      MASTER_KEY_LEN, salt, SALT_LEN, enc_key,
+                                      MASTER_KEY_LEN, salt, SALT_LEN, enc_key.data(),
                                       ENC_KEY_LEN) != ARGON2_OK,
                     "Argon2 failed.");
 
