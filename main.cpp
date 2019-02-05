@@ -75,6 +75,7 @@ void encrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
              CryptoPP::SecByteBlock &master_key);
 void decrypt(size_t file_len, nowide::ifstream &in_file,
              nowide::ofstream &out_file, CryptoPP::SecByteBlock &master_key);
+void make_key(CryptoPP::SecByteBlock &master_key, CryptoPP::SecByteBlock &enc_key, unsigned char *salt);
 
 int main(int argc, char **argv) {
 
@@ -139,6 +140,16 @@ int main(int argc, char **argv) {
     return EXIT_SUCCESS;
 }
 
+void make_key(CryptoPP::SecByteBlock &master_key, CryptoPP::SecByteBlock &enc_key, unsigned char *salt) {
+    CryptoPP::Timer timer;
+    timer.StartTimer();
+    check_fatal_err(argon2id_hash_raw(T, M, P, master_key.data(),
+                                      MASTER_KEY_LEN, salt, SALT_LEN,
+                                      enc_key.data(), ENC_KEY_LEN) != ARGON2_OK,
+                    "Argon2 failed.");
+    nowide::cout << "argon2  " << timer.ElapsedTimeAsDouble() << std::endl;
+}
+
 void encrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
              CryptoPP::SecByteBlock &master_key) {
 
@@ -148,18 +159,10 @@ void encrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
     out_file.write((char *)salt, SALT_LEN);
 
     CryptoPP::SecByteBlock enc_key(ENC_KEY_LEN);
+    make_key(master_key, enc_key, salt);
 
     CryptoPP::Timer timer;
     timer.StartTimer();
-
-    check_fatal_err(argon2id_hash_raw(T, M, P, master_key.data(),
-                                      MASTER_KEY_LEN, salt, SALT_LEN,
-                                      enc_key.data(), ENC_KEY_LEN) != ARGON2_OK,
-                    "Argon2 failed.");
-
-    double argon2 = timer.ElapsedTimeAsDouble();
-    nowide::cout << "argon2  " << argon2 << std::endl;
-
     CryptoPP::ConstByteArrayParameter tweak(&enc_key[T3F_KEY_LEN],
                                             T3F_TWEAK_LEN, false);
     CryptoPP::AlgorithmParameters t3f_params =
@@ -198,8 +201,7 @@ void encrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
     sha3_hmac.Final(hmac_hash);
     out_file.write((char *)hmac_hash, HMAC_HASH_LEN);
 
-    double encrypt = timer.ElapsedTimeAsDouble();
-    nowide::cout << "encrypt " << encrypt - argon2 << std::endl;
+    nowide::cout << "encrypt " << timer.ElapsedTimeAsDouble() << std::endl;
 }
 
 void decrypt(size_t file_len, nowide::ifstream &in_file,
@@ -216,18 +218,11 @@ void decrypt(size_t file_len, nowide::ifstream &in_file,
     check_fatal_err(!in_file || in_file.gcount() != SALT_LEN,
                     "cannot read salt.");
 
+    CryptoPP::SecByteBlock enc_key(ENC_KEY_LEN);
+    make_key(master_key, enc_key, salt);
+
     CryptoPP::Timer timer;
     timer.StartTimer();
-
-    CryptoPP::SecByteBlock enc_key(ENC_KEY_LEN);
-    check_fatal_err(argon2id_hash_raw(T, M, P, master_key.data(),
-                                      MASTER_KEY_LEN, salt, SALT_LEN,
-                                      enc_key.data(), ENC_KEY_LEN) != ARGON2_OK,
-                    "Argon2 failed.");
-
-    double argon2 = timer.ElapsedTimeAsDouble();
-    nowide::cout << "argon2  " << argon2 << std::endl;
-
     CryptoPP::ConstByteArrayParameter tweak(&enc_key[T3F_KEY_LEN],
                                             T3F_TWEAK_LEN, false);
     CryptoPP::AlgorithmParameters t3f_params =
@@ -273,6 +268,5 @@ void decrypt(size_t file_len, nowide::ifstream &in_file,
         CryptoPP::VerifyBufsEqual(hmac_hash, chunk, HMAC_HASH_LEN) != true,
         "wrong HMAC.");
 
-    double decrypt = timer.ElapsedTimeAsDouble();
-    nowide::cout << "decrypt " << decrypt - argon2 << std::endl;
+    nowide::cout << "decrypt " << timer.ElapsedTimeAsDouble() << std::endl;
 }
