@@ -8,6 +8,7 @@ cc = meson.get_compiler('c')
 
 args = '''
 	-march=native
+    -D_M_X64
 '''.split()
 foreach arg: args
     if cppc.has_argument(arg)
@@ -18,16 +19,10 @@ foreach arg: args
     endif
 endforeach
 
-libcryptopp = dependency('libcrypto++', version : '>= 7.0')
-fs = cppc.find_library('stdc++fs', required: true)
-
-subdir('argon2')
+subdir('cppcrypto')
 subdir('nowide')
-
-dependencies = [libcryptopp, fs]
 
 executable('t3fc', 
 		   sources : ['main.cpp'],
-		   link_with : [libargon2, libnowide],
-		   dependencies : dependencies,
+		   link_with : [libcppcrypto, libnowide],
            install : false)
