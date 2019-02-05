@@ -39,8 +39,8 @@ const unsigned int ENC_KEY_LEN = T3F_KEY_LEN + T3F_TWEAK_LEN + T3F_CTR_IV_LEN +
 
 const unsigned char header[HEADER_LEN] = {'t', '3', 'f', 'c', '0', '1'};
 
-const uint32_t T = 10;
-const uint32_t M = 1 << 18;
+const uint32_t T = 9;
+const uint32_t M = 1 << 19;
 const uint32_t P = 1;
 
 void check_fatal_err(bool cond, std::string msg) {
