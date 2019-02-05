@@ -25,7 +25,7 @@ const unsigned int T3F_CTR_IV_LEN = 128;
 const unsigned int NUM_BLOCKS = 2048;
 const unsigned int CHUNK_LEN = NUM_BLOCKS * T3F_BLOCK_LEN;
 
-const unsigned int SALT_LEN = 32;
+const unsigned int SALT_LEN = 64;
 const unsigned int HEADER_LEN = 6;
 const unsigned int MASTER_KEY_LEN = 256;
 
