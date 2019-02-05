@@ -1,7 +1,7 @@
 #include <sodium.h>
 
 #include "argon2/argon2.h"
-#include "kalyna/kalyna.h"
+#include "hc256/hc256_opt32.h"
 #include "skein3fish/skeinApi.h"
 #include "skein3fish/threefishApi.h"
 
@@ -12,9 +12,8 @@
 #define HEADER_LEN 6UL
 #define T3F_TWEAK_LEN 16UL
 #define SALT_LEN 64UL
-#define KALYNA_KEY_LEN 64UL
-#define KALYNA_IV_LEN 64UL
-#define KALYNA_BLOCK_LEN 64UL
+#define HC256_KEY_LEN 32UL
+#define HC256_IV_LEN 32UL
 #define T3F_KEY_LEN 128UL
 #define T3F_BLOCK_LEN 128UL
 #define T3F_IV_LEN 128UL
@@ -22,13 +21,13 @@
 #define CHUNK_LEN (T3F_BLOCK_LEN * NUM_BLOCKS)
 #define SKEIN_MAC_LEN 64UL
 #define ENC_KEY_LEN                                                            \
-    (KALYNA_KEY_LEN + KALYNA_IV_LEN + T3F_KEY_LEN + T3F_TWEAK_LEN +              \
+    (HC256_KEY_LEN + HC256_IV_LEN + T3F_KEY_LEN + T3F_TWEAK_LEN +              \
      SKEIN_MAC_LEN + T3F_IV_LEN)
 
 // number of passes
-#define T 3U
+#define T 9U
 // memory usage
-#define M (1 << 10)
+#define M (1 << 19)
 // number of threads and lanes
 #define P 1U
 
@@ -71,12 +70,10 @@ void *t3fc_malloc(size_t s) {
 void encrypt(FILE *input, FILE *output, unsigned char *key);
 void t3f_encrypt_chunk(ThreefishKey_t *t3f_x, unsigned char *chunk,
                        size_t chunk_len, unsigned char *t3f_iv);
-void kalyna_encrypt_chunk(kalyna_t *kl_x, unsigned char *chunk,
-                       size_t chunk_len, unsigned char *kl_iv);
 void decrypt(FILE *input, FILE *output, unsigned char *key);
 void t3f_decrypt_chunk(ThreefishKey_t *t3f_x, unsigned char *chunk,
                        size_t chunk_len, unsigned char *t3f_iv);
-void prepare(unsigned char *enc_key,
+void prepare(unsigned char *enc_key, HC256_State *hc256_st,
              ThreefishKey_t *t3f_x, SkeinCtx_t *skein_x);
 unsigned char *make_enc_key(unsigned char *master_key, unsigned char *salt);
 
@@ -128,16 +125,18 @@ int main(int argc, char *argv[]) {
     return EXIT_SUCCESS;
 }
 
-void prepare(unsigned char *enc_key,
+void prepare(unsigned char *enc_key, HC256_State *hc256_st,
              ThreefishKey_t *t3f_x, SkeinCtx_t *skein_x) {
+
+    hc256_init(hc256_st, enc_key, &enc_key[HC256_KEY_LEN]);
     threefishSetKey(
         t3f_x, Threefish1024,
-        (uint64_t *)&enc_key[KALYNA_KEY_LEN + KALYNA_IV_LEN],
-        (uint64_t *)&enc_key[KALYNA_KEY_LEN + KALYNA_IV_LEN + T3F_KEY_LEN]);
+        (uint64_t *)&enc_key[HC256_KEY_LEN + HC256_IV_LEN],
+        (uint64_t *)&enc_key[HC256_KEY_LEN + HC256_IV_LEN + T3F_KEY_LEN]);
     skeinCtxPrepare(skein_x, Skein512);
     skeinMacInit(
         skein_x,
-        &enc_key[KALYNA_KEY_LEN + KALYNA_IV_LEN + T3F_KEY_LEN + T3F_TWEAK_LEN],
+        &enc_key[HC256_KEY_LEN + HC256_IV_LEN + T3F_KEY_LEN + T3F_TWEAK_LEN],
         SKEIN_MAC_LEN, Skein512);
 }
 
@@ -160,32 +159,31 @@ void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
                     "cannot write salt.");
 
     unsigned char *enc_key = make_enc_key(master_key, salt);
-    kalyna_t *kl_x = KalynaInit(512, 512);
-    KalynaKeyExpand((uint64_t *)enc_key, kl_x);
-
+    HC256_State *hc256_st = t3fc_malloc(sizeof(HC256_State));
     ThreefishKey_t *t3f_x = t3fc_malloc(sizeof(ThreefishKey_t));
     SkeinCtx_t *skein_x = t3fc_malloc(sizeof(SkeinCtx_t));
-    prepare(enc_key, t3f_x, skein_x);
+    prepare(enc_key, hc256_st, t3f_x, skein_x);
     skeinUpdate(skein_x, header, HEADER_LEN);
     skeinUpdate(skein_x, salt, SALT_LEN);
 
     unsigned char *chunk = t3fc_sodium_malloc(CHUNK_LEN);
     size_t chunk_len = 0;
+    size_t padded_len = 0;
     unsigned char t3f_iv[T3F_IV_LEN];
-    unsigned char kl_iv[KALYNA_IV_LEN];
     memcpy(t3f_iv,
-           &enc_key[KALYNA_KEY_LEN + KALYNA_IV_LEN + T3F_KEY_LEN + T3F_TWEAK_LEN +
+           &enc_key[HC256_KEY_LEN + HC256_IV_LEN + T3F_KEY_LEN + T3F_TWEAK_LEN +
                     SKEIN_MAC_LEN],
            T3F_IV_LEN);
-    memcpy(kl_iv,
-           &enc_key[KALYNA_KEY_LEN],
-           KALYNA_IV_LEN);
 
     while ((chunk_len = fread(chunk, sizeof(unsigned char), CHUNK_LEN, input)) > 0) {
         check_fatal_err(chunk_len != CHUNK_LEN && ferror(input),
                         "cannot read input.");
+        if (chunk_len < CHUNK_LEN) {
+            check_fatal_err(sodium_pad(&padded_len, chunk, chunk_len, T3F_BLOCK_LEN, CHUNK_LEN) != 0, "buffer is not large enough.");
+            chunk_len = padded_len;
+        }
         t3f_encrypt_chunk(t3f_x, chunk, chunk_len, t3f_iv);
-        // kalyna_encrypt_chunk(kl_x, chunk, chunk_len, kl_iv);
+        hc256_process_chunk(hc256_st, chunk, chunk, chunk_len);
         skeinUpdate(skein_x, chunk, chunk_len);
         check_fatal_err(fwrite(chunk, 1, chunk_len, output) != chunk_len,
                         "cannot write to file.");
@@ -199,130 +197,101 @@ void encrypt(FILE *input, FILE *output, unsigned char *master_key) {
     sodium_free(chunk);
     sodium_memzero(t3f_x, sizeof(ThreefishKey_t));
     free(t3f_x);
-    KalynaDelete(kl_x);
+    sodium_memzero(hc256_st, sizeof(HC256_State));
+    free(hc256_st);
     sodium_memzero(skein_x, sizeof(SkeinCtx_t));
     free(skein_x);
 }
 
 void decrypt(FILE *input, FILE *output, unsigned char *master_key) {
 
-    // unsigned char in_header[HEADER_LEN];
-    // check_fatal_err(fread(in_header, 1, HEADER_LEN, input) != HEADER_LEN,
-    //                 "cannot read header.");
-    // check_fatal_err(sodium_memcmp(in_header, header, HEADER_LEN) != 0, "wrong header.");
-    // unsigned char salt[SALT_LEN];
-    // check_fatal_err(fread(salt, 1, SALT_LEN, input) != SALT_LEN,
-    //                 "cannot read salt.");
+    unsigned char in_header[HEADER_LEN];
+    check_fatal_err(fread(in_header, 1, HEADER_LEN, input) != HEADER_LEN,
+                    "cannot read header.");
+    check_fatal_err(sodium_memcmp(in_header, header, HEADER_LEN) != 0, "wrong header.");
+    unsigned char salt[SALT_LEN];
+    check_fatal_err(fread(salt, 1, SALT_LEN, input) != SALT_LEN,
+                    "cannot read salt.");
 
-    // unsigned char *enc_key = make_enc_key(master_key, salt);
-    // HC256_State *hc256_st = t3fc_malloc(sizeof(HC256_State));
-    // ThreefishKey_t *t3f_x = t3fc_malloc(sizeof(ThreefishKey_t));
-    // SkeinCtx_t *skein_x = t3fc_malloc(sizeof(SkeinCtx_t));
-    // prepare(enc_key, hc256_st, t3f_x, skein_x);
-    // skeinUpdate(skein_x, in_header, HEADER_LEN);
-    // skeinUpdate(skein_x, salt, SALT_LEN);
+    unsigned char *enc_key = make_enc_key(master_key, salt);
+    HC256_State *hc256_st = t3fc_malloc(sizeof(HC256_State));
+    ThreefishKey_t *t3f_x = t3fc_malloc(sizeof(ThreefishKey_t));
+    SkeinCtx_t *skein_x = t3fc_malloc(sizeof(SkeinCtx_t));
+    prepare(enc_key, hc256_st, t3f_x, skein_x);
+    skeinUpdate(skein_x, in_header, HEADER_LEN);
+    skeinUpdate(skein_x, salt, SALT_LEN);
 
-    // unsigned char *chunk = t3fc_sodium_malloc(CHUNK_LEN);
-    // unsigned char *read_hash = t3fc_malloc(SKEIN_MAC_LEN);
-    // unsigned char t3f_iv[T3F_IV_LEN];
-    // memcpy(t3f_iv,
-    //        &enc_key[KALYNA_KEY_LEN + KALYNA_IV_LEN + T3F_KEY_LEN + T3F_TWEAK_LEN +
-    //                 SKEIN_MAC_LEN],
-    //        T3F_IV_LEN);
-    // size_t chunk_len = 0;
-    // size_t unpadded_len = CHUNK_LEN;
+    unsigned char *chunk = t3fc_sodium_malloc(CHUNK_LEN);
+    unsigned char *read_hash = t3fc_malloc(SKEIN_MAC_LEN);
+    unsigned char t3f_iv[T3F_IV_LEN];
+    memcpy(t3f_iv,
+           &enc_key[HC256_KEY_LEN + HC256_IV_LEN + T3F_KEY_LEN + T3F_TWEAK_LEN +
+                    SKEIN_MAC_LEN],
+           T3F_IV_LEN);
+    size_t chunk_len = 0;
+    size_t unpadded_len = CHUNK_LEN;
 
-    // while ((chunk_len = fread(chunk, sizeof(unsigned char), CHUNK_LEN, input)) > 0) {
-    //     check_fatal_err(chunk_len != CHUNK_LEN && ferror(input),
-    //                     "cannot read input.");
-    //     if (chunk_len < CHUNK_LEN && chunk_len > SKEIN_MAC_LEN) {
-    //         chunk_len -= SKEIN_MAC_LEN;
-    //         memcpy(read_hash, &chunk[chunk_len], SKEIN_MAC_LEN);
-    //     } else if (chunk_len == SKEIN_MAC_LEN) {
-    //         memcpy(read_hash, chunk, SKEIN_MAC_LEN);
-    //         break;
-    //     }
-    //     skeinUpdate(skein_x, chunk, chunk_len);
-    //     hc256_process_chunk(hc256_st, chunk, chunk, chunk_len);
-    //     t3f_decrypt_chunk(t3f_x, chunk, chunk_len, t3f_iv);
-    //     if (chunk_len < CHUNK_LEN) {
-    //         check_fatal_err(sodium_unpad(&unpadded_len, chunk, chunk_len, T3F_BLOCK_LEN) != 0, "incorrect padding.");
-    //     }
-    //     check_fatal_err(fwrite(chunk, 1, unpadded_len, output) != unpadded_len,
-    //                     "cannot write to file.");
-    // }
+    while ((chunk_len = fread(chunk, sizeof(unsigned char), CHUNK_LEN, input)) > 0) {
+        check_fatal_err(chunk_len != CHUNK_LEN && ferror(input),
+                        "cannot read input.");
+        if (chunk_len < CHUNK_LEN && chunk_len > SKEIN_MAC_LEN) {
+            chunk_len -= SKEIN_MAC_LEN;
+            memcpy(read_hash, &chunk[chunk_len], SKEIN_MAC_LEN);
+        } else if (chunk_len == SKEIN_MAC_LEN) {
+            memcpy(read_hash, chunk, SKEIN_MAC_LEN);
+            break;
+        }
+        skeinUpdate(skein_x, chunk, chunk_len);
+        hc256_process_chunk(hc256_st, chunk, chunk, chunk_len);
+        t3f_decrypt_chunk(t3f_x, chunk, chunk_len, t3f_iv);
+        if (chunk_len < CHUNK_LEN) {
+            check_fatal_err(sodium_unpad(&unpadded_len, chunk, chunk_len, T3F_BLOCK_LEN) != 0, "incorrect padding.");
+        }
+        check_fatal_err(fwrite(chunk, 1, unpadded_len, output) != unpadded_len,
+                        "cannot write to file.");
+    }
 
-    // unsigned char hash[SKEIN_MAC_LEN];
-    // skeinFinal(skein_x, hash);
-    // check_fatal_err(sodium_memcmp(hash, read_hash, SKEIN_MAC_LEN) != 0, "wrong Skein MAC.");
+    unsigned char hash[SKEIN_MAC_LEN];
+    skeinFinal(skein_x, hash);
+    check_fatal_err(sodium_memcmp(hash, read_hash, SKEIN_MAC_LEN) != 0, "wrong Skein MAC.");
 
-    // sodium_free(enc_key);
-    // sodium_free(chunk);
-    // sodium_memzero(t3f_x, sizeof(ThreefishKey_t));
-    // free(t3f_x);
-    // sodium_memzero(hc256_st, sizeof(HC256_State));
-    // free(hc256_st);
-    // sodium_memzero(skein_x, sizeof(SkeinCtx_t));
-    // free(skein_x);
-    // free(read_hash);
+    sodium_free(enc_key);
+    sodium_free(chunk);
+    sodium_memzero(t3f_x, sizeof(ThreefishKey_t));
+    free(t3f_x);
+    sodium_memzero(hc256_st, sizeof(HC256_State));
+    free(hc256_st);
+    sodium_memzero(skein_x, sizeof(SkeinCtx_t));
+    free(skein_x);
+    free(read_hash);
 }
 
 void t3f_encrypt_chunk(ThreefishKey_t *t3f_x, unsigned char *chunk,
                        size_t chunk_len, unsigned char *t3f_iv) {
     uint32_t i = 0;
-    unsigned char tmp[T3F_BLOCK_LEN];
     for (; chunk_len >= T3F_BLOCK_LEN; ++i, chunk_len -= T3F_BLOCK_LEN) {
-        sodium_increment(t3f_iv, T3F_IV_LEN);
-        threefishEncryptBlockBytes(t3f_x, t3f_iv, tmp);
         for (uint32_t j = 0; j < T3F_BLOCK_LEN; ++j) {
             chunk[i * T3F_BLOCK_LEN + j] =
-                tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
+                t3f_iv[j] ^ chunk[i * T3F_BLOCK_LEN + j];
         }
+        threefishEncryptBlockBytes(t3f_x, &chunk[i * T3F_BLOCK_LEN], &chunk[i * T3F_BLOCK_LEN]);
+        memcpy(t3f_iv, &chunk[i * T3F_BLOCK_LEN], T3F_BLOCK_LEN);
     }
-    if (chunk_len > 0) {
-        sodium_increment(t3f_iv, T3F_IV_LEN);
-        threefishEncryptBlockBytes(t3f_x, t3f_iv, tmp);
-        for (uint32_t j = 0; j < chunk_len; ++j) {
-            chunk[i * T3F_BLOCK_LEN + j] =
-                tmp[j] ^ chunk[i * T3F_BLOCK_LEN + j];
-        }
-    }
-}
-
-void kalyna_encrypt_chunk(kalyna_t *kl_x, unsigned char *chunk,
-                       size_t chunk_len, unsigned char *kl_iv) {
-    uint32_t i = 0;
-    unsigned char tmp[KALYNA_BLOCK_LEN];
-    for (; chunk_len >= KALYNA_BLOCK_LEN; ++i, chunk_len -= KALYNA_BLOCK_LEN) {
-        sodium_increment(kl_iv, KALYNA_BLOCK_LEN);
-        KalynaEncipher((uint64_t *)kl_iv, kl_x, (uint64_t *)tmp);
-        for (uint32_t j = 0; j < KALYNA_BLOCK_LEN; ++j) {
-            chunk[i * KALYNA_BLOCK_LEN + j] =
-                tmp[j] ^ chunk[i * KALYNA_BLOCK_LEN + j];
-        }
-    }
-    if (chunk_len > 0) {
-        sodium_increment(kl_iv, KALYNA_BLOCK_LEN);
-        KalynaEncipher((uint64_t *)kl_iv, kl_x, (uint64_t *)tmp);
-        for (uint32_t j = 0; j < chunk_len; ++j) {
-            chunk[i * KALYNA_BLOCK_LEN + j] =
-                tmp[j] ^ chunk[i * KALYNA_BLOCK_LEN + j];
-        }
-    }
+    check_fatal_err(chunk_len != 0, "plaintext must be a multiple of the block size.");
 }
 
 void t3f_decrypt_chunk(ThreefishKey_t *t3f_x, unsigned char *chunk,
                        size_t chunk_len, unsigned char *t3f_iv) {
-    // uint32_t i = 0;
-    // unsigned char tmp[T3F_BLOCK_LEN];
-    // for (; chunk_len >= T3F_BLOCK_LEN; ++i, chunk_len -= T3F_BLOCK_LEN) {
-    //     memcpy(tmp, &chunk[i * T3F_BLOCK_LEN], T3F_BLOCK_LEN);
-    //     threefishDecryptBlockBytes(t3f_x, &chunk[i * T3F_BLOCK_LEN], &chunk[i * T3F_BLOCK_LEN]);
-    //     for (uint32_t j = 0; j < T3F_BLOCK_LEN; ++j) {
-    //         chunk[i * T3F_BLOCK_LEN + j] =
-    //             t3f_iv[j] ^ chunk[i * T3F_BLOCK_LEN + j];
-    //     }
-    //     memcpy(t3f_iv, tmp, T3F_BLOCK_LEN);
-    // }
-    // check_fatal_err(chunk_len != 0, "plaintext must be a multiple of the block size.");
+    uint32_t i = 0;
+    unsigned char tmp[T3F_BLOCK_LEN];
+    for (; chunk_len >= T3F_BLOCK_LEN; ++i, chunk_len -= T3F_BLOCK_LEN) {
+        memcpy(tmp, &chunk[i * T3F_BLOCK_LEN], T3F_BLOCK_LEN);
+        threefishDecryptBlockBytes(t3f_x, &chunk[i * T3F_BLOCK_LEN], &chunk[i * T3F_BLOCK_LEN]);
+        for (uint32_t j = 0; j < T3F_BLOCK_LEN; ++j) {
+            chunk[i * T3F_BLOCK_LEN + j] =
+                t3f_iv[j] ^ chunk[i * T3F_BLOCK_LEN + j];
+        }
+        memcpy(t3f_iv, tmp, T3F_BLOCK_LEN);
+    }
+    check_fatal_err(chunk_len != 0, "plaintext must be a multiple of the block size.");
 }

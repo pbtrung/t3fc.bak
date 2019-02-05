@@ -172,7 +172,7 @@ void encrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
     CryptoPP::CTR_Mode_ExternalCipher::Encryption t3f_ctr(
         t3f, &enc_key[T3F_KEY_LEN + T3F_TWEAK_LEN]);
 
-    CryptoPP::CTR_Mode<CryptoPP::Kalyna512>::Encryption kalyna(
+    CryptoPP::CTR_Mode<CryptoPP::Kalyna512>::Encryption kalyna_ctr(
         &enc_key[T3F_KEY_LEN + T3F_TWEAK_LEN + T3F_CTR_IV_LEN], KL_KEY_LEN,
         &enc_key[T3F_KEY_LEN + T3F_TWEAK_LEN + T3F_CTR_IV_LEN + KL_KEY_LEN]);
 
@@ -192,7 +192,7 @@ void encrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
             break;
         }
         t3f_ctr.ProcessData(chunk.data(), chunk.data(), chunk_len);
-        kalyna.ProcessData(chunk.data(), chunk.data(), chunk_len);
+        kalyna_ctr.ProcessData(chunk.data(), chunk.data(), chunk_len);
         sha3_hmac.Update(chunk.data(), chunk_len);
         out_file.write((char *)chunk.data(), chunk_len);
     }
@@ -232,7 +232,7 @@ void decrypt(size_t file_len, nowide::ifstream &in_file,
     CryptoPP::CTR_Mode_ExternalCipher::Encryption t3f_ctr(
         t3f, &enc_key[T3F_KEY_LEN + T3F_TWEAK_LEN]);
 
-    CryptoPP::CTR_Mode<CryptoPP::Kalyna512>::Encryption kalyna(
+    CryptoPP::CTR_Mode<CryptoPP::Kalyna512>::Encryption kalyna_ctr(
         &enc_key[T3F_KEY_LEN + T3F_TWEAK_LEN + T3F_CTR_IV_LEN], KL_KEY_LEN,
         &enc_key[T3F_KEY_LEN + T3F_TWEAK_LEN + T3F_CTR_IV_LEN + KL_KEY_LEN]);
 
@@ -256,7 +256,7 @@ void decrypt(size_t file_len, nowide::ifstream &in_file,
         in_file.read((char *)chunk.data(), chunk_len);
         check_fatal_err(in_file.gcount() % chunk_len != 0, "cannot read file.");
         sha3_hmac.Update(chunk.data(), chunk_len);
-        kalyna.ProcessData(chunk.data(), chunk.data(), chunk_len);
+        kalyna_ctr.ProcessData(chunk.data(), chunk.data(), chunk_len);
         t3f_ctr.ProcessData(chunk.data(), chunk.data(), chunk_len);
         out_file.write((char *)chunk.data(), chunk_len);
     }
