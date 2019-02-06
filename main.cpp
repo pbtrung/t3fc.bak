@@ -37,8 +37,8 @@ const unsigned int ENC_KEY_LEN = T3F_KEY_LEN + T3F_TWEAK_LEN + T3F_CBC_IV_LEN +
 
 const unsigned char header[HEADER_LEN] = {'t', '3', 'f', 'c', '0', '1'};
 
-const uint32_t T = 3;
-const uint32_t M = 1 << 10;
+const uint32_t T = 9;
+const uint32_t M = 1 << 19;
 const uint32_t P = 1;
 
 void check_fatal_err(bool cond, std::string msg) {
@@ -165,10 +165,10 @@ void encrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
     t3f.init((const unsigned char *)enc_key,
              cppcrypto::block_cipher::encryption);
     t3f.set_tweak((const unsigned char *)&enc_key[T3F_KEY_LEN]);
-    cppcrypto::cbc t3f_cbc(t3f);
-    t3f_cbc.init((const unsigned char *)enc_key, T3F_KEY_LEN,
+    cppcrypto::ctr t3f_ctr(t3f);
+    t3f_ctr.init((const unsigned char *)enc_key, T3F_KEY_LEN,
                  (const unsigned char *)&enc_key[T3F_KEY_LEN + T3F_TWEAK_LEN],
-                 T3F_CBC_IV_LEN, cppcrypto::block_cipher::encryption);
+                 T3F_CBC_IV_LEN);
     cppcrypto::kalyna512_512 kl;
     cppcrypto::ctr kl_ctr(kl);
     kl_ctr.init(
@@ -186,22 +186,18 @@ void encrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
     
     std::vector<unsigned char> chunk(CHUNK_LEN);
     size_t chunk_len = 0;
-    size_t out_len = 0;
     while (in_file) {
         in_file.read((char *)chunk.data(), CHUNK_LEN);
         chunk_len = in_file.gcount();
         if (chunk_len == 0) {
             break;
         }
-        t3f_cbc.encrypt_update(chunk.data(), chunk_len, chunk.data(), out_len);
-        kl_ctr.encrypt(chunk.data(), out_len, chunk.data());
-        hmac.update(chunk.data(), out_len);
-        out_file.write((char *)chunk.data(), out_len);
+        t3f_ctr.encrypt(chunk.data(), chunk_len, chunk.data());
+        kl_ctr.encrypt(chunk.data(), chunk_len, chunk.data());
+        hmac.update(chunk.data(), chunk_len);
+        out_file.write((char *)chunk.data(), chunk_len);
     }
-    t3f_cbc.encrypt_final(chunk.data(), out_len);
-    kl_ctr.encrypt(chunk.data(), out_len, chunk.data());
-    hmac.update(chunk.data(), out_len);
-    out_file.write((char *)chunk.data(), out_len);
+
     unsigned char hmac_hash[HMAC_HASH_LEN];
     hmac.final(hmac_hash);
     out_file.write((char *)hmac_hash, HMAC_HASH_LEN);
@@ -236,10 +232,10 @@ void decrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
     t3f.init((const unsigned char *)enc_key,
              cppcrypto::block_cipher::decryption);
     t3f.set_tweak((const unsigned char *)&enc_key[T3F_KEY_LEN]);
-    cppcrypto::cbc t3f_cbc(t3f);
-    t3f_cbc.init((const unsigned char *)enc_key, T3F_KEY_LEN,
+    cppcrypto::ctr t3f_ctr(t3f);
+    t3f_ctr.init((const unsigned char *)enc_key, T3F_KEY_LEN,
                  (const unsigned char *)&enc_key[T3F_KEY_LEN + T3F_TWEAK_LEN],
-                 T3F_CBC_IV_LEN, cppcrypto::block_cipher::decryption);
+                 T3F_CBC_IV_LEN);
     cppcrypto::kalyna512_512 kl;
     cppcrypto::ctr kl_ctr(kl);
     kl_ctr.init(
@@ -257,7 +253,6 @@ void decrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
     
     std::vector<unsigned char> chunk(CHUNK_LEN);
     size_t chunk_len = 0;
-    size_t out_len = 0;
     while (in_file) {
         in_file.read((char *)chunk.data(), CHUNK_LEN);
         chunk_len = in_file.gcount();
@@ -268,13 +263,10 @@ void decrypt(nowide::ifstream &in_file, nowide::ofstream &out_file,
         }
         hmac.update(chunk.data(), chunk_len);
         kl_ctr.decrypt(chunk.data(), chunk_len, chunk.data());
-        t3f_cbc.decrypt_update(chunk.data(), chunk_len, chunk.data(), out_len);
-        out_file.write((char *)chunk.data(), out_len);
+        t3f_ctr.decrypt(chunk.data(), chunk_len, chunk.data());
+        out_file.write((char *)chunk.data(), chunk_len);
     }
-    kl_ctr.decrypt(t3f_cbc.block_, T3F_BLOCK_LEN, t3f_cbc.block_);
-    t3f_cbc.decrypt_final(chunk.data(), out_len);
-    hmac.update(chunk.data(), out_len);
-    out_file.write((char *)chunk.data(), out_len);
+    
     unsigned char hmac_hash[HMAC_HASH_LEN];
     hmac.final(hmac_hash);
     
