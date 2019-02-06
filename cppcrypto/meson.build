@@ -10,7 +10,6 @@ libcppcrypto_sources = files('''
 	blake512-sse41.c
 	block_cipher.cpp
 	cbc.cpp
-    ctr.cpp
 	cpuinfo.cpp
 	crypto_hash.cpp
 	hmac.cpp

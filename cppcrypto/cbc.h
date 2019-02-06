@@ -42,13 +42,12 @@ namespace cppcrypto
 
 		size_t keysize() const { return cipher_->keysize(); }
 		size_t ivsize() const { return cipher_->blocksize(); }
-        
-        unsigned char* block_;
-        
+
 	private:
 		cbc(const cbc&) = delete;
 		void operator=(const cbc&) = delete;
-		
+
+		unsigned char* block_;
 		unsigned char* iv_;
 		size_t pos;
 		size_t nb_;

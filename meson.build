@@ -23,6 +23,6 @@ subdir('cppcrypto')
 subdir('nowide')
 
 executable('t3fc', 
-		   sources : ['main.cpp', 'randombytes/randombytes.c'],
+		   sources : ['main.cpp'],
 		   link_with : [libcppcrypto, libnowide],
            install : false)
